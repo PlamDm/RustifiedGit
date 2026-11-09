@@ -1,0 +1,118 @@
+{
+  "repository": "llvm/llvm-project full clone",
+  "tracked_files": 190340,
+  "commit_graph_built_once_ms": 5905.67,
+  "query_before_index": [
+    {
+      "query": "status",
+      "samples_ms": [
+        735.12,
+        609.97,
+        591.14
+      ],
+      "bytes": 112
+    },
+    {
+      "query": "tracked_files",
+      "samples_ms": [
+        35.25,
+        37.42,
+        37.9
+      ],
+      "bytes": 10024681
+    },
+    {
+      "query": "refs",
+      "samples_ms": [
+        6.31,
+        4.93,
+        4.77
+      ],
+      "bytes": 168430
+    },
+    {
+      "query": "log_current_graph_300",
+      "samples_ms": [
+        3448.74,
+        3519.09,
+        3608.21
+      ],
+      "bytes": 62813
+    },
+    {
+      "query": "log_plain_300",
+      "samples_ms": [
+        17.66,
+        17.26,
+        19.01
+      ],
+      "bytes": 62213
+    },
+    {
+      "query": "log_graph_no_abbrev_300",
+      "samples_ms": [
+        3608.27,
+        3594.76,
+        3469.29
+      ],
+      "bytes": 58452
+    },
+    {
+      "query": "log_current_graph_5000",
+      "samples_ms": [
+        3528.24,
+        3614.14,
+        3532.15
+      ],
+      "bytes": 1047424
+    }
+  ],
+  "query_after_index": [
+    {
+      "commits": 300,
+      "samples_ms": [
+        60.86,
+        46.34,
+        40.98
+      ],
+      "bytes": 62386
+    },
+    {
+      "commits": 1000,
+      "samples_ms": [
+        65.75,
+        44.21,
+        38.95
+      ],
+      "bytes": 209220
+    },
+    {
+      "commits": 5000,
+      "samples_ms": [
+        105.81,
+        135.14,
+        90.86
+      ],
+      "bytes": 1047183
+    }
+  ],
+  "terminal_measurement": "process launch to first commit hash received at 140x40; both loaders use the acceleration index; baseline starts with 300 commits, new loader starts with 1000",
+  "terminal": {
+    "previous_snapshot_loader": {
+      "samples_ms": [
+        915.92,
+        650.21,
+        630.64
+      ],
+      "median_ms": 650.21
+    },
+    "independent_history_loader": {
+      "samples_ms": [
+        333.12,
+        172.24,
+        162.23
+      ],
+      "median_ms": 172.24
+    }
+  }
+}

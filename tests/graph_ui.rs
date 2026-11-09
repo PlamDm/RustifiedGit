@@ -78,7 +78,7 @@ fn wait(app: &mut App, done: impl Fn(&App) -> bool) {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         app.poll_workers();
-        if done(app) {
+        if done(app) && !app.history_loading {
             break;
         }
         assert!(
@@ -280,7 +280,8 @@ fn graph_navigation_loads_message_files_and_diff_without_stealing_focus() {
     assert_eq!(app.commit_files[0].path, Path::new("main.txt"));
     assert!(app.preview.text.contains("+main"));
     let index = app.filtered_commits()[app.selected(Panel::Commits)];
-    std::sync::Arc::make_mut(&mut app.snapshot).commits[index].decorations =
+    let snapshot = std::sync::Arc::make_mut(&mut app.snapshot);
+    std::sync::Arc::make_mut(&mut snapshot.commits)[index].decorations =
         "HEAD -> main, origin/a-very-long-remote-branch-that-crowds-out-the-subject".into();
     let text = screen(&mut app, 140, 40);
     assert!(text.contains("Detailed main body."));
@@ -506,4 +507,104 @@ fn a_single_large_hunk_scrolls_immediately_and_can_still_be_staged_whole() {
         contents.trim_end()
     );
     assert!(git(&app.repo.root, &["diff", "--", "main.txt"]).is_empty());
+}
+
+#[test]
+fn history_prefetches_past_the_first_page_and_status_refreshes_reuse_it() {
+    use pd_lazygit::git::HISTORY_PAGE_SIZE;
+    use std::{io::Write, process::Stdio, sync::Arc};
+
+    let (_dir, mut app, _) = fixture();
+    let count = HISTORY_PAGE_SIZE + 405;
+    let mut stream = String::from("blob\nmark :1\ndata 5\npage\n\n");
+    for index in 0..count {
+        stream.push_str(&format!(
+            "commit refs/heads/main\nmark :{}\ncommitter Graph Test <graph@example.invalid> {} +0000\ndata {}\nPage commit {}\n",
+            index + 2, 1700000000 + index, format!("Page commit {index}").len() + 1, index
+        ));
+        if index == 0 {
+            stream.push_str("from refs/heads/main^0\n");
+        } else {
+            stream.push_str(&format!("from :{}\n", index + 1));
+        }
+        stream.push_str("M 100644 :1 history.txt\n\n");
+    }
+    let mut child = Command::new("git")
+        .args(["fast-import", "--quiet"])
+        .current_dir(&app.repo.root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(stream.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    app.refresh();
+    wait(&mut app, |app| !app.loading);
+    assert_eq!(app.snapshot.commits.len(), HISTORY_PAGE_SIZE);
+    assert!(!app.history_exhausted);
+    let status_generation = app.workers.refresh.current();
+    app.select_graph_row(HISTORY_PAGE_SIZE - 25);
+    let oid = app.selected_commit().unwrap().oid.clone();
+    assert!(app.history_loading);
+    wait(&mut app, |app| !app.inspection_loading);
+    assert_eq!(app.snapshot.commits.len(), count + 2);
+    assert!(app.history_exhausted);
+    assert_eq!(app.selected_commit().unwrap().oid, oid);
+    assert_eq!(
+        app.workers.refresh.current(),
+        status_generation,
+        "paging must not scan the worktree"
+    );
+    let unique: std::collections::HashSet<_> = app
+        .snapshot
+        .commits
+        .iter()
+        .map(|commit| &commit.oid)
+        .collect();
+    assert_eq!(unique.len(), count + 2);
+
+    let history_generation = app.workers.history.current();
+    let cached = app.snapshot.commits.clone();
+    fs::write(app.repo.root.join("only-status.txt"), "dirty\n").unwrap();
+    app.refresh();
+    wait(&mut app, |app| !app.loading);
+    assert_eq!(
+        app.workers.history.current(),
+        history_generation,
+        "unchanged refs must reuse history"
+    );
+    assert!(Arc::ptr_eq(&cached, &app.snapshot.commits));
+    assert!(
+        app.snapshot
+            .files
+            .iter()
+            .any(|file| file.path == Path::new("only-status.txt"))
+    );
+}
+
+#[test]
+fn history_acceleration_builds_only_git_metadata() {
+    let (_dir, mut app, _) = fixture();
+    let head = git(&app.repo.root, &["rev-parse", "HEAD"]);
+    let status = git(&app.repo.root, &["status", "--porcelain"]);
+    let index = fs::read(app.repo.git_dir.join("index")).unwrap();
+    key(&mut app, KeyCode::Char('G'));
+    assert!(app.busy.is_some());
+    wait(&mut app, |app| app.busy.is_none() && !app.loading);
+    assert!(app.repo.git_dir.join("objects/info/commit-graph").exists());
+    assert_eq!(git(&app.repo.root, &["rev-parse", "HEAD"]), head);
+    assert_eq!(git(&app.repo.root, &["status", "--porcelain"]), status);
+    assert_eq!(fs::read(app.repo.git_dir.join("index")).unwrap(), index);
 }

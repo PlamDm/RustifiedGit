@@ -1,5 +1,5 @@
 use serde::Serialize;
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct FileEntry {
@@ -111,7 +111,7 @@ pub struct Worktree {
 pub struct Snapshot {
     pub files: Vec<FileEntry>,
     pub references: Vec<Reference>,
-    pub commits: Vec<Commit>,
+    pub commits: Arc<Vec<Commit>>,
     pub stashes: Vec<Stash>,
     pub worktrees: Vec<Worktree>,
     pub branch: String,

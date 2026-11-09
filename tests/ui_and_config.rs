@@ -278,7 +278,8 @@ fn copied_commits_keep_source_order_after_switching_branch_histories() {
                 oid: "older".into(),
                 ..Commit::default()
             },
-        ],
+        ]
+        .into(),
         ..Snapshot::default()
     });
     app.handle_key(KeyEvent::new(KeyCode::Char('C'), KeyModifiers::SHIFT));
@@ -288,7 +289,8 @@ fn copied_commits_keep_source_order_after_switching_branch_histories() {
         commits: vec![Commit {
             oid: "target-branch".into(),
             ..Commit::default()
-        }],
+        }]
+        .into(),
         ..Snapshot::default()
     });
     app.selections[3] = 0;

@@ -64,8 +64,20 @@ the same inspector. Pane 7 initially shows changed files; `Ctrl+s` can turn off
 the changed-only filter to browse the full repository tree.
 
 Local branches also provide tags and worktrees through `[`/`]`. Graph history
-is initially limited to 300 commits; `.` loads more. A search hides graph edges
-between omitted rows. Reflog remains available through `[`/`]` in the graph.
+loads the first 1,000 commits independently of file status, then automatically
+loads another 1,000 when you approach the end. `.` explicitly loads another page.
+The count's `+` means older commits remain. History is reused while refs and
+filters stay unchanged. A search filters loaded commits and hides edges between
+omitted rows. Reflog remains available through `[`/`]` in the graph.
+
+For a large fresh clone, press `G` in the graph to build Git's commit-graph
+acceleration cache. The first build can take several seconds; subsequent
+topological history queries can be much faster. This writes Git metadata without
+changing commits, branches, the index or working files. The equivalent command is:
+
+```sh
+git -C /path/to/repo commit-graph write --reachable
+```
 
 ## Your fork's workflows
 
@@ -172,7 +184,7 @@ results. See [PERFORMANCE.md](PERFORMANCE.md) for recorded measurements.
   checks and typed operations. All mutation semantics remain Git's own.
 - `process.rs`: bounded pipe reads, streaming output, cancellation and child
   process-group cleanup.
-- `worker.rs`: coalesced read requests and independent serialized write jobs.
+- `worker.rs`: independent history/status/preview reads and serialized write jobs.
 - `tree.rs`: directory aggregation, clean/ignored styling metadata and filters.
 - `patch.rs`: complete hunk and selected-line patches applied by `git apply`.
 - `app.rs`: state transitions, keybindings, dialogs and command dispatch.

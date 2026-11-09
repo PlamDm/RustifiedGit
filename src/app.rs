@@ -1,6 +1,9 @@
 use crate::{
     config::{Config, CustomCommand, State, key_matches},
-    git::{Operation, ReadOptions, Repository, Step, discard_operation, stage_operation},
+    git::{
+        HISTORY_PAGE_SIZE, Operation, ReadOptions, Repository, Step, discard_operation,
+        stage_operation,
+    },
     model::{CommitDetails, FileEntry, Panel, Preview, PreviewTarget, RefKind, Snapshot},
     patch::Patch,
     process::{Cancellation, CommandSpec},
@@ -123,6 +126,10 @@ pub struct App {
     pub pending_repo: Option<PathBuf>,
     pub busy: Option<(Cancellation, Instant, String)>,
     pub loading: bool,
+    pub history_loading: bool,
+    pub history_exhausted: bool,
+    pub history_elapsed_ms: u128,
+    history_key: Option<HistoryKey>,
     pub preview_loading: bool,
     pub changed_only: bool,
     pub fullscreen: bool,
@@ -133,6 +140,13 @@ pub struct App {
     pub last_refresh: Instant,
     pub last_fetch: Instant,
     preview_key: Option<(PreviewTarget, bool, usize, bool)>,
+}
+
+#[derive(PartialEq, Eq)]
+struct HistoryKey {
+    options: ReadOptions,
+    references: Vec<(String, String, bool)>,
+    head: String,
 }
 
 pub fn panel_index(panel: Panel) -> usize {
@@ -155,12 +169,13 @@ impl App {
         state.remember(&repo.root);
         let options = ReadOptions {
             ignored: state.show_ignored,
-            commit_limit: 300,
+            commit_limit: HISTORY_PAGE_SIZE,
             graph: true,
             visible_refs: state
                 .visible_branches
                 .get(repo.root.to_string_lossy().as_ref())
-                .cloned(),
+                .cloned()
+                .or_else(|| Some(vec!["HEAD".into()])),
             ..ReadOptions::default()
         };
         let workers = Workers::new(repo.clone());
@@ -211,6 +226,10 @@ impl App {
             pending_repo: None,
             busy: None,
             loading: true,
+            history_loading: false,
+            history_exhausted: true,
+            history_elapsed_ms: 0,
+            history_key: None,
             preview_loading: false,
             changed_only: true,
             fullscreen: false,
@@ -258,6 +277,7 @@ impl App {
             .insert(self.repo.root.to_string_lossy().into_owned(), refs.clone());
         self.save_state();
         self.commit_tab = 0;
+        self.options.commit_limit = HISTORY_PAGE_SIZE;
         self.loading = false;
         self.refresh();
     }
@@ -437,6 +457,9 @@ impl App {
         self.diff_scroll = 0;
         self.request_preview(false);
         self.dirty = true;
+        if logical_index > 0 && logical_index.saturating_add(50) >= self.length(Panel::Commits) {
+            self.load_more_history();
+        }
     }
     pub fn select_list_row(&mut self, panel: Panel, index: usize) {
         if panel == Panel::Commits {
@@ -491,6 +514,9 @@ impl App {
             .collect()
     }
     pub fn filtered_commits(&self) -> Vec<usize> {
+        if self.search(Panel::Commits).is_empty() {
+            return (0..self.snapshot.commits.len()).collect();
+        }
         self.snapshot
             .commits
             .iter()
@@ -584,6 +610,43 @@ impl App {
         self.last_refresh = Instant::now();
     }
 
+    fn request_history(&mut self) {
+        let mut options = self.options.clone();
+        options.ignored = false;
+        options.reflog = self.commit_tab == 1;
+        let key = HistoryKey {
+            options,
+            references: self
+                .snapshot
+                .references
+                .iter()
+                .map(|reference| {
+                    (
+                        reference.full_name.clone(),
+                        reference.oid.clone(),
+                        reference.current,
+                    )
+                })
+                .collect(),
+            head: self.snapshot.head.clone(),
+        };
+        if self.history_key.as_ref() == Some(&key) {
+            return;
+        }
+        self.workers.history.submit(key.options.clone());
+        self.history_key = Some(key);
+        self.history_loading = true;
+        self.dirty = true;
+    }
+
+    fn load_more_history(&mut self) {
+        if self.history_loading || self.history_exhausted {
+            return;
+        }
+        self.options.commit_limit = self.options.commit_limit.saturating_add(HISTORY_PAGE_SIZE);
+        self.request_history();
+    }
+
     fn target(&self) -> Option<PreviewTarget> {
         match self.side {
             Panel::Files | Panel::CommitFiles => {
@@ -672,11 +735,53 @@ impl App {
         }
         while let Ok(event) = self.workers.events.try_recv() {
             match event {
+                WorkerEvent::References(id, references, head)
+                    if id == self.workers.refresh.current() =>
+                {
+                    let snapshot = Arc::make_mut(&mut self.snapshot);
+                    snapshot.references = references;
+                    snapshot.head = head;
+                    self.request_history();
+                }
                 WorkerEvent::Snapshot(id, result) if id == self.workers.refresh.current() => {
                     self.loading = false;
                     match result {
-                        Ok(snapshot) => self.apply_snapshot(snapshot),
+                        Ok(mut snapshot) => {
+                            snapshot.commits = self.snapshot.commits.clone();
+                            self.apply_snapshot(snapshot);
+                            self.request_history();
+                        }
                         Err(error) => self.error(error),
+                    }
+                }
+                WorkerEvent::History(id, result) if id == self.workers.history.current() => {
+                    self.history_loading = false;
+                    match result {
+                        Ok(page) => {
+                            let selected_oid =
+                                self.selected_commit().map(|commit| commit.oid.clone());
+                            self.history_exhausted = page.exhausted;
+                            self.history_elapsed_ms = page.elapsed_ms;
+                            Arc::make_mut(&mut self.snapshot).commits = Arc::new(page.commits);
+                            if let Some(oid) = selected_oid {
+                                self.selections[3] = self
+                                    .filtered_commits()
+                                    .iter()
+                                    .position(|index| self.snapshot.commits[*index].oid == oid)
+                                    .unwrap_or(0);
+                            }
+                            if self.snapshot.commits.is_empty() {
+                                self.graph_working_tree = true;
+                            }
+                            self.clamp_selections();
+                            self.sync_inspection();
+                            self.preview_key = None;
+                            self.request_preview(self.focus == Panel::Diff);
+                        }
+                        Err(error) => {
+                            self.history_key = None;
+                            self.error(error);
+                        }
                     }
                 }
                 WorkerEvent::Preview(id, result) if id == self.workers.preview.current() => {
@@ -1506,6 +1611,19 @@ impl App {
             }
             return Ok(());
         }
+        if self.focus == Panel::Commits && key_matches(".", key) {
+            self.load_more_history();
+            return Ok(());
+        }
+        if self.focus == Panel::Commits && key_matches("G", key) {
+            self.run_operation(Operation::git([
+                "commit-graph",
+                "write",
+                "--reachable",
+                "--progress",
+            ]));
+            return Ok(());
+        }
         if self.is("universal", "openDiffTool", &["<ctrl+t>"], key) {
             self.external_tool(false)?;
             return Ok(());
@@ -2049,10 +2167,6 @@ impl App {
                     run_item("Finish bisect", ["bisect", "reset"], false),
                 ],
             );
-        } else if key_matches(".", key) {
-            self.options.commit_limit += 300;
-            self.loading = false;
-            self.refresh();
         }
         Ok(())
     }

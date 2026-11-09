@@ -19,10 +19,11 @@ use std::{
 
 const READ_LIMIT: usize = 64 * 1024 * 1024;
 const READ_TIMEOUT: Duration = Duration::from_secs(60);
+pub const HISTORY_PAGE_SIZE: usize = 1000;
 type IndexStamp = (Option<SystemTime>, u64);
 type TrackedCache = Arc<Mutex<Option<(IndexStamp, Vec<PathBuf>)>>>;
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ReadOptions {
     pub ignored: bool,
     pub history_path: Option<PathBuf>,
@@ -275,7 +276,15 @@ impl Repository {
         }
         args.extend([
             "-z".into(),
-            format!("--max-count={}", options.commit_limit.max(300)).into(),
+            format!(
+                "--max-count={}",
+                if options.commit_limit == 0 {
+                    HISTORY_PAGE_SIZE
+                } else {
+                    options.commit_limit
+                }
+            )
+            .into(),
             "--format=%x00%H%x00%h%x00%s%x00%an%x00%aI%x00%D%x00%P%x00".into(),
         ]);
         if options.graph && !options.reflog {
@@ -378,11 +387,56 @@ impl Repository {
     }
 
     pub fn snapshot(&self, options: &ReadOptions, cancel: &Cancellation) -> Result<Snapshot> {
+        self.snapshot_inner(options, cancel, true)
+    }
+
+    pub fn status_snapshot(
+        &self,
+        options: &ReadOptions,
+        cancel: &Cancellation,
+    ) -> Result<Snapshot> {
+        self.snapshot_inner(options, cancel, false)
+    }
+
+    pub fn ref_state(&self, cancel: &Cancellation) -> Result<(Vec<Reference>, String)> {
+        let references = self.references(cancel)?;
+        let head = if let Some(reference) = references.iter().find(|reference| reference.current) {
+            reference.oid.clone()
+        } else {
+            let output = process::run(
+                &self.root,
+                &CommandSpec::git(["rev-parse", "--verify", "HEAD"]),
+                cancel,
+                4096,
+                None,
+                READ_TIMEOUT,
+            )?;
+            if output.code == 0 {
+                output.text().trim().to_owned()
+            } else {
+                String::new()
+            }
+        };
+        Ok((references, head))
+    }
+
+    fn snapshot_inner(
+        &self,
+        options: &ReadOptions,
+        cancel: &Cancellation,
+        include_history: bool,
+    ) -> Result<Snapshot> {
         let started = Instant::now();
         let (files, refs, commits, stashes, worktrees) = thread::scope(|scope| {
             let files = scope.spawn(|| self.files(options.ignored, cancel));
             let refs = scope.spawn(|| self.references(cancel));
-            let commits = scope.spawn(|| self.commits(options, cancel));
+            let commits = scope.spawn(|| {
+                if include_history {
+                    self.commits(options, cancel)
+                } else {
+                    Ok(Vec::new())
+                }
+            });
             let stashes = scope.spawn(|| self.stashes(cancel));
             let worktrees = self.worktrees(cancel);
             (
@@ -432,7 +486,7 @@ impl Repository {
         Ok(Snapshot {
             files,
             references,
-            commits: commits?,
+            commits: Arc::new(commits?),
             stashes: stashes?,
             worktrees: worktrees?,
             branch: branch_description,

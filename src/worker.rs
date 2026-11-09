@@ -1,7 +1,7 @@
 use crate::{
     config::GuiConfig,
     git::{Operation, ReadOptions, Repository},
-    model::{CommitInspection, Preview, PreviewTarget, Snapshot},
+    model::{Commit, CommitInspection, Preview, PreviewTarget, Reference, Snapshot},
     process::Cancellation,
 };
 use std::{
@@ -11,6 +11,7 @@ use std::{
         mpsc::{self, Receiver, Sender, SyncSender},
     },
     thread,
+    time::Instant,
 };
 
 type Pending<T> = Arc<(Mutex<(Option<(u64, T)>, bool)>, Condvar)>;
@@ -81,10 +82,18 @@ pub struct PreviewRequest {
 }
 
 pub enum WorkerEvent {
+    References(u64, Vec<Reference>, String),
     Snapshot(u64, Result<Snapshot, String>),
+    History(u64, Result<HistoryPage, String>),
     Preview(u64, Result<Preview, String>),
     CommitFiles(u64, String, Result<CommitInspection, String>),
     CommandDone(Result<String, String>),
+}
+
+pub struct HistoryPage {
+    pub commits: Vec<Commit>,
+    pub exhausted: bool,
+    pub elapsed_ms: u128,
 }
 
 pub struct CommandRequest {
@@ -94,6 +103,7 @@ pub struct CommandRequest {
 
 pub struct Workers {
     pub refresh: Latest<ReadOptions>,
+    pub history: Latest<ReadOptions>,
     pub preview: Latest<PreviewRequest>,
     pub commit_files: Latest<String>,
     pub commands: Sender<CommandRequest>,
@@ -109,11 +119,38 @@ impl Workers {
         let refresh_repo = repo.clone();
         let refresh_events = events.clone();
         let refresh = Latest::spawn(move |id, options, cancel: Cancellation| {
+            if let Ok((references, head)) = refresh_repo.ref_state(&cancel) {
+                if !cancel.is_cancelled() {
+                    let _ = refresh_events.send(WorkerEvent::References(id, references, head));
+                }
+            }
             let result = refresh_repo
-                .snapshot(&options, &cancel)
+                .status_snapshot(&options, &cancel)
                 .map_err(|error| format!("{error:#}"));
             if !cancel.is_cancelled() {
                 let _ = refresh_events.send(WorkerEvent::Snapshot(id, result));
+            }
+        });
+        let history_repo = repo.clone();
+        let history_events = events.clone();
+        let history = Latest::spawn(move |id, mut options: ReadOptions, cancel: Cancellation| {
+            let started = Instant::now();
+            let limit = options.commit_limit.max(1);
+            options.commit_limit = limit.saturating_add(1);
+            let result = history_repo
+                .commits(&options, &cancel)
+                .map(|mut commits| {
+                    let exhausted = commits.len() <= limit;
+                    commits.truncate(limit);
+                    HistoryPage {
+                        commits,
+                        exhausted,
+                        elapsed_ms: started.elapsed().as_millis(),
+                    }
+                })
+                .map_err(|error| format!("{error:#}"));
+            if !cancel.is_cancelled() {
+                let _ = history_events.send(WorkerEvent::History(id, result));
             }
         });
         let preview_repo = repo.clone();
@@ -161,6 +198,7 @@ impl Workers {
         });
         Self {
             refresh,
+            history,
             preview,
             commit_files,
             commands,

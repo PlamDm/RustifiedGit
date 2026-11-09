@@ -10,7 +10,7 @@ use crossterm::{
 use pd_lazygit::{
     app::App,
     config::{Config, State},
-    git::{ReadOptions, Repository},
+    git::{HISTORY_PAGE_SIZE, ReadOptions, Repository},
     model::Panel,
     process::Cancellation,
     ui,
@@ -74,7 +74,7 @@ fn main() -> Result<()> {
     let options = ReadOptions {
         history_path: args.filter,
         history_directory,
-        commit_limit: 300,
+        commit_limit: HISTORY_PAGE_SIZE,
         ..ReadOptions::default()
     };
     if args.snapshot {
@@ -111,7 +111,6 @@ fn main() -> Result<()> {
     let mut app = App::new(repo, config, state);
     app.options.history_path = options.history_path;
     app.options.history_directory = options.history_directory;
-    app.options.commit_limit = options.commit_limit;
     if app.options.history_path.is_some() {
         app.workers.refresh.cancel();
         app.loading = false;
@@ -235,7 +234,12 @@ fn run(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
             }
         }
         if event::poll(Duration::from_millis(
-            if app.loading || app.inspection_loading || app.preview_loading || app.busy.is_some() {
+            if app.loading
+                || app.history_loading
+                || app.inspection_loading
+                || app.preview_loading
+                || app.busy.is_some()
+            {
                 16
             } else {
                 40

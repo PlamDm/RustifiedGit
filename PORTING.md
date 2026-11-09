@@ -35,7 +35,7 @@ feature parity. This file keeps that boundary explicit.
 | Files/index | File/directory/range selection, stage/unstage, discarded changes, ignores, editor/opener |
 | Partial changes | Hunk or individual added/removed line staging and unstaging; confirmed discard |
 | Commits | Message/editor, amend, hooks and signing via Git, fixup, revert, cherry-pick copied commits, reset options |
-| History | Graph of enabled local/remote refs, shared ancestors, persisted visibility, paginated commits, reflog, path filter with rename following, automatic full message/file/diff inspection |
+| History | Graph of enabled local/remote refs, shared ancestors, persisted visibility, automatic history paging independent of file status, cached unchanged history, Git commit-graph acceleration action, reflog, path filter with rename following, automatic full message/file/diff inspection |
 | Branches | Create, checkout/force checkout/previous, rename/delete, merge/rebase, set upstream |
 | Remotes/tags | List remote refs, fetch/pull/push, local tag create/delete, tag push |
 | Worktrees | List, create, open and remove |
