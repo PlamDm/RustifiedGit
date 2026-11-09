@@ -1235,6 +1235,7 @@ impl App {
         }
         if self.is("universal", "return", &["<esc>"], key) {
             if self.focus == Panel::Diff {
+                self.fullscreen = false;
                 self.set_focus(self.side);
             } else if self.focus == Panel::CommitFiles {
                 self.set_focus(Panel::Commits);
@@ -1770,6 +1771,7 @@ impl App {
                 }
                 self.rebuild();
             } else {
+                self.fullscreen = true;
                 self.set_focus(Panel::Diff);
             }
         }

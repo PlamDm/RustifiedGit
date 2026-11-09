@@ -298,8 +298,14 @@ fn graph_navigation_loads_message_files_and_diff_without_stealing_focus() {
     assert_eq!(app.focus, Panel::CommitFiles);
     key(&mut app, KeyCode::Enter);
     assert_eq!(app.focus, Panel::Diff);
+    assert!(app.fullscreen);
+    let layout = ui::areas(Rect::new(0, 0, 140, 40), &app);
+    assert_eq!(layout.diff.width, 140);
+    assert!(layout.graph.is_empty());
+    assert!(layout.files.is_empty());
     key(&mut app, KeyCode::Esc);
     assert_eq!(app.focus, Panel::CommitFiles);
+    assert!(!app.fullscreen);
     key(&mut app, KeyCode::Char('5'));
     key(&mut app, KeyCode::Home);
     wait(&mut app, |app| !app.preview_loading);
@@ -308,6 +314,15 @@ fn graph_navigation_loads_message_files_and_diff_without_stealing_focus() {
     assert!(app.commit_rows.is_empty());
     assert_eq!(app.file_panel(), Panel::Files);
     assert!(app.preview.text.contains("+working change"));
+    key(&mut app, KeyCode::Char('7'));
+    let selected = app.selected(Panel::Files);
+    key(&mut app, KeyCode::Enter);
+    assert_eq!(app.focus, Panel::Diff);
+    assert!(app.fullscreen);
+    key(&mut app, KeyCode::Esc);
+    assert_eq!(app.focus, Panel::Files);
+    assert_eq!(app.selected(Panel::Files), selected);
+    assert!(!app.fullscreen);
 }
 
 #[test]

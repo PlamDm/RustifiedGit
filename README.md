@@ -54,7 +54,8 @@ saved per repository. Initially the graph shows the current branch.
 
 Move with `j`/`k` in pane 5 to update the full commit message, metadata, changed
 files and selected file's diff. Focus stays in the graph. `Enter` moves to files;
-another `Enter` opens the diff. Pane 6 scrolls wrapped messages and metadata.
+another `Enter` opens the file's diff full screen. `Esc` restores the pane layout
+and returns to the same file. Pane 6 scrolls wrapped messages and metadata.
 The graph's first row, **Working tree / Index**, shows uncommitted changes in
 the same inspector. Pane 7 initially shows changed files; `Ctrl+s` can turn off
 the changed-only filter to browse the full repository tree.
