@@ -1,6 +1,7 @@
 gui:
   showUnchangedFiles: true
   showFileTree: true
+  branchGroupDelimiter: '/'
   diffPreviewMaxFileBytes: 2097152
   diffPreviewMaxBytes: 524288
   sidePanelWidth: 0.32

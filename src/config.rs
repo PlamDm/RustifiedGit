@@ -18,6 +18,7 @@ pub struct GuiConfig {
     pub side_panel_width: f64,
     pub mouse_events: bool,
     pub command_log_size: usize,
+    pub branch_group_delimiter: String,
 }
 
 impl Default for GuiConfig {
@@ -30,6 +31,7 @@ impl Default for GuiConfig {
             side_panel_width: 0.32,
             mouse_events: true,
             command_log_size: 1000,
+            branch_group_delimiter: "/".into(),
         }
     }
 }
@@ -178,6 +180,13 @@ impl Config {
         config.refresher.refresh_interval = config.refresher.refresh_interval.max(1);
         config.refresher.fetch_interval = config.refresher.fetch_interval.max(30);
         config.gui.command_log_size = config.gui.command_log_size.clamp(100, 100_000);
+        if config
+            .gui
+            .branch_group_delimiter
+            .contains(['\r', '\n', '\0'])
+        {
+            bail!("gui.branchGroupDelimiter must not contain control separators");
+        }
         config.directory = directory;
         Ok(config)
     }
@@ -235,6 +244,29 @@ pub fn key_matches(binding: &str, key: KeyEvent) -> bool {
                 .modifiers
                 .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER);
     }
+    let Some(expected) = key_event(binding) else {
+        return false;
+    };
+    let actual_modifiers = if matches!(key.code, KeyCode::Char(c) if c.is_uppercase()) {
+        key.modifiers - KeyModifiers::SHIFT
+    } else {
+        key.modifiers
+    };
+    key.code == expected.code && actual_modifiers == expected.modifiers
+}
+
+pub fn key_event(binding: &str) -> Option<KeyEvent> {
+    if binding.is_empty() || binding == "<disabled>" {
+        return None;
+    }
+    if !binding.starts_with('<') || !binding.ends_with('>') {
+        let mut chars = binding.chars();
+        let character = chars.next()?;
+        return chars
+            .next()
+            .is_none()
+            .then(|| KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+    }
     let inner = &binding[1..binding.len() - 1];
     let parts: Vec<_> = inner.split('+').collect();
     let mut modifiers = KeyModifiers::empty();
@@ -244,7 +276,7 @@ pub fn key_matches(binding: &str, key: KeyEvent) -> bool {
             "alt" => KeyModifiers::ALT,
             "shift" => KeyModifiers::SHIFT,
             "meta" | "super" => KeyModifiers::SUPER,
-            _ => return false,
+            _ => return None,
         };
     }
     let name = parts.last().copied().unwrap_or("");
@@ -268,12 +300,7 @@ pub fn key_matches(binding: &str, key: KeyEvent) -> bool {
         "backspace" => KeyCode::Backspace,
         "delete" => KeyCode::Delete,
         name if name.chars().count() == 1 => KeyCode::Char(name.chars().next().unwrap()),
-        _ => return false,
+        _ => return None,
     };
-    let actual_modifiers = if matches!(code, KeyCode::Char(c) if c.is_uppercase()) {
-        key.modifiers - KeyModifiers::SHIFT
-    } else {
-        key.modifiers
-    };
-    key.code == code && actual_modifiers == modifiers
+    Some(KeyEvent::new(code, modifiers))
 }

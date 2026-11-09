@@ -285,7 +285,7 @@ impl Repository {
                 }
             )
             .into(),
-            "--format=%x00%H%x00%h%x00%s%x00%an%x00%aI%x00%D%x00%P%x00".into(),
+            "--format=%x00%H%x00%h%x00%s%x00%an%x00%aI%x00%D%x00%P%x00%cn%x00%cI%x00".into(),
         ]);
         if options.graph && !options.reflog {
             args.extend([
@@ -1168,7 +1168,7 @@ pub fn parse_commits(bytes: &[u8]) -> Vec<Commit> {
         let field = fields[index];
         if matches!(field.len(), 40 | 64)
             && field.iter().all(u8::is_ascii_hexdigit)
-            && index + 6 < fields.len()
+            && index + 8 < fields.len()
         {
             let text = |offset: usize| String::from_utf8_lossy(fields[index + offset]).into_owned();
             let graph_prefix = graph.pop().unwrap_or_default();
@@ -1178,12 +1178,14 @@ pub fn parse_commits(bytes: &[u8]) -> Vec<Commit> {
                 subject: text(2),
                 author: text(3),
                 date: text(4),
+                committer: text(7),
+                committed_at: text(8),
                 decorations: text(5),
                 parents: text(6).split_whitespace().map(str::to_owned).collect(),
                 graph_prefix,
                 graph_before: std::mem::take(&mut graph),
             });
-            index += 7;
+            index += 9;
         } else {
             graph.extend(
                 String::from_utf8_lossy(field)

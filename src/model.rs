@@ -68,6 +68,8 @@ pub struct Commit {
     pub subject: String,
     pub author: String,
     pub date: String,
+    pub committer: String,
+    pub committed_at: String,
     pub decorations: String,
     pub parents: Vec<String>,
     pub graph_prefix: String,
@@ -162,6 +164,20 @@ pub enum Panel {
 }
 
 impl Panel {
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Status => "Repositories",
+            Self::Files => "Working files",
+            Self::Branches => "Local branches",
+            Self::RemoteBranches => "Remote branches",
+            Self::Commits => "Commit graph",
+            Self::Stash => "Stashes",
+            Self::Details => "Commit details",
+            Self::Output => "Command output",
+            Self::Diff => "Diff",
+            Self::CommitFiles => "Committed files",
+        }
+    }
     pub fn number(self) -> usize {
         match self {
             Self::Status => 1,

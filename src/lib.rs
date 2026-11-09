@@ -1,4 +1,6 @@
+pub mod actions;
 pub mod app;
+pub mod branches;
 pub mod config;
 pub mod git;
 pub mod model;

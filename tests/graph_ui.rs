@@ -202,9 +202,12 @@ fn branch_visibility_is_persisted_without_checkout_and_combines_unique_commits()
             .any(|commit| commit.oid == feature)
     );
     let local = app
-        .refs_for(false)
+        .branch_rows(false)
         .iter()
-        .position(|index| app.snapshot.references[*index].name == "feature")
+        .position(|row| {
+            row.reference
+                .is_some_and(|index| app.snapshot.references[index].name == "feature")
+        })
         .unwrap();
     app.select_list_row(Panel::Branches, local);
     key(&mut app, KeyCode::Char(' '));
@@ -218,9 +221,12 @@ fn branch_visibility_is_persisted_without_checkout_and_combines_unique_commits()
     );
     assert_eq!(app.snapshot.commits.len(), 3);
     let remote = app
-        .refs_for(true)
+        .branch_rows(true)
         .iter()
-        .position(|index| app.snapshot.references[*index].name == "origin/feature")
+        .position(|row| {
+            row.reference
+                .is_some_and(|index| app.snapshot.references[index].name == "origin/feature")
+        })
         .unwrap();
     app.select_list_row(Panel::RemoteBranches, remote);
     key(&mut app, KeyCode::Char(' '));
@@ -245,8 +251,13 @@ fn branch_visibility_is_persisted_without_checkout_and_combines_unique_commits()
     assert_eq!(reopened.snapshot.commits.len(), 3);
     for panel in [Panel::Branches, Panel::RemoteBranches] {
         let refs = reopened.refs_for(panel == Panel::RemoteBranches);
-        for (position, index) in refs.into_iter().enumerate() {
+        for index in refs {
             if reopened.branch_visible(&reopened.snapshot.references[index]) {
+                let position = reopened
+                    .branch_rows(panel == Panel::RemoteBranches)
+                    .iter()
+                    .position(|row| row.reference == Some(index))
+                    .unwrap();
                 reopened.select_list_row(panel, position);
                 key(&mut reopened, KeyCode::Char(' '));
                 wait(&mut reopened, |app| !app.loading);
@@ -607,4 +618,379 @@ fn history_acceleration_builds_only_git_metadata() {
     assert_eq!(git(&app.repo.root, &["rev-parse", "HEAD"]), head);
     assert_eq!(git(&app.repo.root, &["status", "--porcelain"]), status);
     assert_eq!(fs::read(app.repo.git_dir.join("index")).unwrap(), index);
+}
+
+#[test]
+fn commit_rows_reserve_the_right_edge_for_committer_initials_and_date() {
+    use std::sync::Arc;
+    let (_dir, mut app, _) = fixture();
+    let snapshot = Arc::make_mut(&mut app.snapshot);
+    let commit = &mut Arc::make_mut(&mut snapshot.commits)[0];
+    commit.author = "Other Author".into();
+    commit.date = "1999-02-01T00:00:00Z".into();
+    commit.committer = "Jane Mary Smith".into();
+    commit.committed_at = "2026-11-26T12:00:00+02:00".into();
+    commit.subject = "修复 Unicode columns and a very long commit message ".repeat(8);
+    for (width, height) in [(80, 24), (120, 34), (180, 46)] {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| ui::draw(frame, &mut app)).unwrap();
+        let rect = ui::areas(Rect::new(0, 0, width, height), &app).graph;
+        let buffer = terminal.backend().buffer();
+        let line: String = (rect.x + 1..rect.right() - 1)
+            .map(|x| buffer[(x, rect.y + 2)].symbol())
+            .collect();
+        assert!(line.ends_with("JS 26 Nov 2026"), "{width}: {line}");
+        assert!(line.contains('…'), "{width}: {line}");
+        assert!(!line.contains("1999"));
+    }
+}
+
+#[test]
+fn nested_branch_groups_collapse_search_and_toggle_visibility_without_checkout() {
+    let (_dir, mut app, _) = fixture();
+    git(&app.repo.root, &["branch", "-D", "feature"]);
+    git(
+        &app.repo.root,
+        &["update-ref", "-d", "refs/remotes/origin/feature"],
+    );
+    for branch in [
+        "feature/user/login",
+        "feature/user/profile",
+        "feature/admin/tools",
+        "bugfix/urgent",
+    ] {
+        git(&app.repo.root, &["branch", branch, "main"]);
+    }
+    for branch in ["origin/feature/user/login", "origin/feature/user/profile"] {
+        git(
+            &app.repo.root,
+            &["update-ref", &format!("refs/remotes/{branch}"), "HEAD"],
+        );
+    }
+    app.refresh();
+    wait(&mut app, |app| !app.loading);
+    let row = |app: &App, remote, path: &str| {
+        app.branch_rows(remote)
+            .iter()
+            .position(|row| row.path == path)
+            .unwrap()
+    };
+    assert_eq!(app.branch_rows(false)[row(&app, false, "feature")].depth, 0);
+    assert_eq!(
+        app.branch_rows(false)[row(&app, false, "feature/user")].depth,
+        1
+    );
+    assert_eq!(
+        app.branch_rows(false)[row(&app, false, "feature/user/login")].depth,
+        2
+    );
+    assert_eq!(
+        app.branch_rows(true)[row(&app, true, "origin/feature/user/login")].depth,
+        3
+    );
+    let head = git(&app.repo.root, &["rev-parse", "HEAD"]);
+    let status = git(&app.repo.root, &["status", "--porcelain"]);
+    app.select_list_row(Panel::Branches, row(&app, false, "feature/user"));
+    let children = app.selected_branch_row().unwrap().descendants.clone();
+    key(&mut app, KeyCode::Char(' '));
+    assert!(app.busy.is_none());
+    wait(&mut app, |app| !app.loading);
+    assert!(
+        children
+            .iter()
+            .all(|index| app.branch_visible(&app.snapshot.references[*index]))
+    );
+    assert_eq!(git(&app.repo.root, &["rev-parse", "HEAD"]), head);
+    assert_eq!(git(&app.repo.root, &["status", "--porcelain"]), status);
+    key(&mut app, KeyCode::Enter);
+    assert!(
+        app.branch_rows(false)
+            .iter()
+            .all(|row| row.path != "feature/user/login")
+    );
+    assert_eq!(app.selected_branch_row().unwrap().path, "feature/user");
+    for character in "/profile".chars() {
+        key(&mut app, KeyCode::Char(character));
+    }
+    key(&mut app, KeyCode::Enter);
+    assert!(
+        app.branch_rows(false)
+            .iter()
+            .any(|row| row.path == "feature/user/profile")
+    );
+    key(&mut app, KeyCode::Esc);
+    app.select_list_row(Panel::Branches, row(&app, false, "feature/user"));
+    key(&mut app, KeyCode::Right);
+    assert!(
+        app.branch_rows(false)
+            .iter()
+            .any(|row| row.path == "feature/user/login")
+    );
+    key(&mut app, KeyCode::Right);
+    assert_eq!(app.selected_ref().unwrap().name, "feature/user/login");
+    key(&mut app, KeyCode::Left);
+    assert_eq!(app.selected_branch_row().unwrap().path, "feature/user");
+    app.select_list_row(
+        Panel::RemoteBranches,
+        row(&app, true, "origin/feature/user"),
+    );
+    key(&mut app, KeyCode::Char(' '));
+    wait(&mut app, |app| !app.loading);
+    assert!(
+        app.selected_branch_row()
+            .unwrap()
+            .descendants
+            .iter()
+            .all(|index| app.branch_visible(&app.snapshot.references[*index]))
+    );
+    assert!(app.busy.is_none());
+    assert_eq!(git(&app.repo.root, &["rev-parse", "HEAD"]), head);
+
+    app.select_list_row(Panel::Branches, row(&app, false, "feature/user/login"));
+    key(&mut app, KeyCode::Enter);
+    wait(&mut app, |app| app.busy.is_none() && !app.loading);
+    assert_eq!(
+        git(&app.repo.root, &["symbolic-ref", "--short", "HEAD"]),
+        "feature/user/login"
+    );
+}
+
+#[test]
+fn configured_branch_delimiters_support_nested_groups_and_flat_mode() {
+    let (_dir, mut app, _) = fixture();
+    git(&app.repo.root, &["branch", "topic--user--login"]);
+    git(&app.repo.root, &["branch", "topic--user--profile"]);
+    git(&app.repo.root, &["branch", "topic--user"]);
+    app.config.gui.branch_group_delimiter = "--".into();
+    app.refresh();
+    wait(&mut app, |app| !app.loading);
+    assert!(
+        app.branch_rows(false)
+            .iter()
+            .any(|row| row.path == "topic--user" && row.depth == 1 && row.is_group())
+    );
+    assert!(
+        app.branch_rows(false)
+            .iter()
+            .any(|row| row.path == "topic--user--login" && row.depth == 2 && !row.is_group())
+    );
+    let leaf = app
+        .branch_rows(false)
+        .iter()
+        .position(|row| row.path == "topic--user" && !row.is_group())
+        .unwrap();
+    app.select_list_row(Panel::Branches, leaf);
+    app.rebuild_branch_rows();
+    assert_eq!(app.selected_ref().unwrap().name, "topic--user");
+    app.config.gui.branch_group_delimiter.clear();
+    app.rebuild_branch_rows();
+    assert!(
+        app.branch_rows(false)
+            .iter()
+            .all(|row| !row.is_group() && row.depth == 0)
+    );
+    std::sync::Arc::make_mut(&mut app.snapshot).worktrees = (0..3)
+        .map(|index| pd_lazygit::model::Worktree {
+            path: format!("worktree-{index}").into(),
+            ..Default::default()
+        })
+        .collect();
+    app.branch_tab = 3;
+    app.selections[pd_lazygit::app::panel_index(Panel::Branches)] = 2;
+    app.rebuild();
+    assert_eq!(
+        app.selected(Panel::Branches),
+        2,
+        "branch grouping must preserve worktree selection"
+    );
+}
+
+#[test]
+fn actions_menu_shows_focused_commands_and_runs_the_selected_action() {
+    use pd_lazygit::app::Modal;
+    let (_dir, mut app, _) = fixture();
+    key(&mut app, KeyCode::Char('O'));
+    let Some(Modal::Actions { items, .. }) = &app.modal else {
+        panic!("Expected action menu");
+    };
+    assert!(
+        !items.iter().any(|action| action.label == "Commit…"),
+        "No staged files yet"
+    );
+    let index = items
+        .iter()
+        .position(|action| action.label == "Stage all")
+        .unwrap();
+    let description = items[index].description.clone();
+    for _ in 0..index {
+        key(&mut app, KeyCode::Down);
+    }
+    let text = screen(&mut app, 150, 42);
+    assert!(text.contains(&description));
+    key(&mut app, KeyCode::Enter);
+    assert!(app.modal.is_none());
+    assert!(app.busy.is_some());
+    wait(&mut app, |app| app.busy.is_none() && !app.loading);
+    assert_eq!(
+        git(&app.repo.root, &["diff", "--cached", "--name-only"]),
+        "main.txt"
+    );
+
+    key(&mut app, KeyCode::Char('7'));
+    key(&mut app, KeyCode::Char('o'));
+    assert!(
+        app.pending_external.take().is_some(),
+        "o must retain its file opener behavior"
+    );
+    assert!(app.modal.is_none());
+    key(&mut app, KeyCode::Char('O'));
+    assert!(matches!(app.modal, Some(Modal::Actions { .. })));
+    key(&mut app, KeyCode::Esc);
+    app.select_graph_row(1);
+    wait(&mut app, |app| !app.inspection_loading);
+    let head = git(&app.repo.root, &["rev-parse", "HEAD"]);
+    key(&mut app, KeyCode::Char('o'));
+    let Some(Modal::Actions { items, .. }) = &app.modal else {
+        panic!("o should open graph actions");
+    };
+    let index = items
+        .iter()
+        .position(|action| action.label == "Reset options…")
+        .unwrap();
+    for _ in 0..index {
+        key(&mut app, KeyCode::Down);
+    }
+    key(&mut app, KeyCode::Enter);
+    assert!(matches!(app.modal, Some(Modal::Menu { .. })));
+    key(&mut app, KeyCode::Down);
+    key(&mut app, KeyCode::Down);
+    key(&mut app, KeyCode::Enter);
+    assert!(
+        matches!(app.modal, Some(Modal::Confirm { .. })),
+        "Destructive actions must retain confirmation"
+    );
+    assert!(app.busy.is_none());
+    assert_eq!(git(&app.repo.root, &["rev-parse", "HEAD"]), head);
+}
+
+#[test]
+fn action_menu_respects_remaps_disabled_actions_and_custom_commands() {
+    use pd_lazygit::{actions, app::Modal, config::CustomCommand};
+    let (_dir, mut app, _) = fixture();
+    app.config.keybinding = serde_yaml::from_str(
+        "universal:\n  select: '<ctrl+g>'\nfiles:\n  toggleStagedAll: '<disabled>'\n",
+    )
+    .unwrap();
+    app.config.custom_commands.push(CustomCommand {
+        key: "x".into(),
+        context: "files".into(),
+        description: "Say hello".into(),
+        command: "printf action-menu-ready".into(),
+        ..CustomCommand::default()
+    });
+    key(&mut app, KeyCode::Char('7'));
+    let available = actions::for_app(&app);
+    assert!(!available.iter().any(|action| action.label == "Stage all"));
+    assert_eq!(
+        available
+            .iter()
+            .find(|action| action.label == "Stage / unstage")
+            .unwrap()
+            .key,
+        "Ctrl+g"
+    );
+    key(&mut app, KeyCode::Char('O'));
+    let Some(Modal::Actions { items, .. }) = &app.modal else {
+        panic!("Expected actions");
+    };
+    assert!(
+        items
+            .iter()
+            .any(|action| action.label == "Say hello" && action.key == "x")
+    );
+    app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL));
+    wait(&mut app, |app| app.busy.is_none() && !app.loading);
+    assert_eq!(
+        git(&app.repo.root, &["diff", "--cached", "--name-only"]),
+        "main.txt"
+    );
+    key(&mut app, KeyCode::Char('O'));
+    key(&mut app, KeyCode::Char('x'));
+    wait(&mut app, |app| app.busy.is_none() && !app.loading);
+    assert!(
+        app.output
+            .iter()
+            .any(|line| line.contains("action-menu-ready"))
+    );
+}
+
+#[test]
+fn graph_fast_scrolling_tracks_visible_height_and_keeps_file_range_selection() {
+    use pd_lazygit::model::{FileEntry, Snapshot};
+    use std::{io::Write, process::Stdio, sync::Arc};
+    let (_dir, mut app, _) = fixture();
+    let parent = git(&app.repo.root, &["rev-parse", "HEAD"]);
+    let mut stream = String::new();
+    for index in 0..90 {
+        let message = format!("Navigation commit {index}");
+        stream.push_str(&format!("commit refs/heads/main\nmark :{}\ncommitter Graph Test <graph@example.invalid> {} +0000\ndata {}\n{message}\nfrom {}\n\n", index + 1, 1700000000 + index, message.len() + 1, if index == 0 { parent.clone() } else { format!(":{index}") }));
+    }
+    let mut child = Command::new("git")
+        .args(["fast-import", "--quiet"])
+        .current_dir(&app.repo.root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(stream.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    app.refresh();
+    wait(&mut app, |app| !app.loading);
+    screen(&mut app, 120, 30);
+    let short_page = app.page_step();
+    app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT));
+    assert_eq!(app.selected(Panel::Commits) + 1, short_page);
+    assert!(app.marked.is_empty());
+    key(&mut app, KeyCode::Down);
+    assert_eq!(app.selected(Panel::Commits) + 1, short_page + 1);
+    key(&mut app, KeyCode::Home);
+    screen(&mut app, 120, 55);
+    let tall_page = app.page_step();
+    assert!(tall_page > short_page);
+    app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT));
+    assert_eq!(app.selected(Panel::Commits) + 1, tall_page);
+    app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT));
+    assert!(app.graph_working_tree);
+    key(&mut app, KeyCode::PageDown);
+    assert_eq!(app.selected(Panel::Commits) + 1, tall_page);
+
+    app.graph_working_tree = true;
+    app.snapshot = Arc::new(Snapshot {
+        files: ["a.txt", "b.txt"]
+            .into_iter()
+            .map(|path| FileEntry {
+                path: path.into(),
+                old_path: None,
+                index: b' ',
+                worktree: b'M',
+            })
+            .collect(),
+        ..Snapshot::default()
+    });
+    app.rebuild();
+    key(&mut app, KeyCode::Char('7'));
+    app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT));
+    assert_eq!(app.selected(Panel::Files), 1);
+    assert_eq!(app.marked.len(), 2);
 }

@@ -36,13 +36,13 @@ feature parity. This file keeps that boundary explicit.
 | Partial changes | Hunk or individual added/removed line staging and unstaging; confirmed discard |
 | Commits | Message/editor, amend, hooks and signing via Git, fixup, revert, cherry-pick copied commits, reset options |
 | History | Graph of enabled local/remote refs, shared ancestors, persisted visibility, automatic history paging independent of file status, cached unchanged history, Git commit-graph acceleration action, reflog, path filter with rename following, automatic full message/file/diff inspection |
-| Branches | Create, checkout/force checkout/previous, rename/delete, merge/rebase, set upstream |
+| Branches | Nested delimiter groups, collapse/search/group graph visibility; create, checkout/force checkout/previous, rename/delete, merge/rebase, set upstream |
 | Remotes/tags | List remote refs, fetch/pull/push, local tag create/delete, tag push |
 | Worktrees | List, create, open and remove |
 | Stash | Save tracked/untracked/staged/keep-index, preview, apply, pop and drop |
 | Conflict/operation control | External merge tool, ours/theirs, stage resolutions, rebase/merge/cherry-pick/revert continue/abort; bisect controls |
 | Advanced interactive Git | `!` restores the terminal and runs Git/editor interactively, then refreshes |
-| UI | Separate numbered repository/local/remote/stash/graph/details/files/diff panes and output drawer; keyboard/mouse, fuzzy list filters, resize, zoom, wrapped message scrolling, horizontal diff scroll, bounded output history |
+| UI | Separate numbered panes and output drawer; committer/date columns with truncated graph subjects; executable context actions and shared bottom hints; adaptive fast scrolling, keyboard/mouse, fuzzy list filters, resize, zoom, wrapped message scrolling, horizontal diff scroll, bounded output history |
 
 ## Remaining upstream compatibility work
 

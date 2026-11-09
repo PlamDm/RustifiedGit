@@ -1,4 +1,6 @@
 use crate::{
+    actions::{self, Action},
+    branches::{self, BranchRow},
     config::{Config, CustomCommand, State, key_matches},
     git::{
         HISTORY_PAGE_SIZE, Operation, ReadOptions, Repository, Step, discard_operation,
@@ -74,6 +76,11 @@ pub enum Modal {
         items: Vec<MenuItem>,
         selected: usize,
     },
+    Actions {
+        title: String,
+        items: Vec<Action>,
+        selected: usize,
+    },
     Help {
         scroll: usize,
     },
@@ -95,6 +102,9 @@ pub struct App {
     pub selections: [usize; 10],
     pub scrolls: [usize; 10],
     pub searches: [String; 10],
+    pub page_sizes: [usize; 10],
+    pub branch_rows_cache: [Vec<BranchRow>; 2],
+    pub collapsed_branches: [HashSet<String>; 2],
     pub graph_working_tree: bool,
     pub commit_details: Option<CommitDetails>,
     pub details_lines: Vec<String>,
@@ -201,6 +211,9 @@ impl App {
             inspection_loading: false,
             inspection_oid: None,
             searches: std::array::from_fn(|_| String::new()),
+            page_sizes: [15; 10],
+            branch_rows_cache: std::array::from_fn(|_| Vec::new()),
+            collapsed_branches: std::array::from_fn(|_| HashSet::new()),
             collapsed: HashSet::new(),
             marked: HashSet::new(),
             copied_commits: Vec::new(),
@@ -262,15 +275,26 @@ impl App {
                     || (reference.current && refs.iter().any(|name| name == "HEAD"))
             })
     }
-    fn toggle_branch_visibility(&mut self, reference: &crate::model::Reference) {
-        let refs = self.options.visible_refs.get_or_insert_with(Vec::new);
-        if let Some(index) = refs
+    fn toggle_branch_visibility(&mut self, references: &[crate::model::Reference]) {
+        if references.is_empty() {
+            return;
+        }
+        let enable = !references
             .iter()
-            .position(|name| name == &reference.full_name || (reference.current && name == "HEAD"))
-        {
-            refs.remove(index);
-        } else {
-            refs.push(reference.full_name.clone());
+            .all(|reference| self.branch_visible(reference));
+        let refs = self.options.visible_refs.get_or_insert_with(Vec::new);
+        for reference in references {
+            if enable {
+                if !refs.iter().any(|name| {
+                    name == &reference.full_name || (reference.current && name == "HEAD")
+                }) {
+                    refs.push(reference.full_name.clone());
+                }
+            } else {
+                refs.retain(|name| {
+                    name != &reference.full_name && !(reference.current && name == "HEAD")
+                });
+            }
         }
         self.state
             .visible_branches
@@ -307,6 +331,8 @@ impl App {
         }
         if files_changed {
             self.rebuild();
+        } else {
+            self.rebuild_branch_rows();
         }
         self.clamp_selections();
         self.sync_inspection();
@@ -492,6 +518,108 @@ impl App {
     pub fn filtered_refs(&self) -> Vec<usize> {
         self.refs_for(self.focus == Panel::RemoteBranches)
     }
+    pub fn branch_rows(&self, remote: bool) -> &[BranchRow] {
+        &self.branch_rows_cache[usize::from(remote)]
+    }
+    pub fn selected_branch_row(&self) -> Option<&BranchRow> {
+        if !matches!(self.focus, Panel::Branches | Panel::RemoteBranches)
+            || (self.focus == Panel::Branches && self.branch_tab == 3)
+        {
+            return None;
+        }
+        self.branch_rows(self.focus == Panel::RemoteBranches)
+            .get(self.selected(self.focus))
+    }
+    pub fn rebuild_branch_rows(&mut self) {
+        for remote in [false, true] {
+            let cache = usize::from(remote);
+            if !remote && self.branch_tab == 3 {
+                self.branch_rows_cache[cache].clear();
+                continue;
+            }
+            let panel = if remote {
+                Panel::RemoteBranches
+            } else {
+                Panel::Branches
+            };
+            let selection = panel_index(panel);
+            let old = self.branch_rows_cache[cache]
+                .get(self.selections[selection])
+                .map(|row| (row.path.clone(), row.is_group()));
+            let delimiter = if !remote && self.branch_tab != 0 {
+                ""
+            } else {
+                &self.config.gui.branch_group_delimiter
+            };
+            let indices = if !remote && self.branch_tab == 3 {
+                vec![]
+            } else {
+                self.refs_for(remote)
+            };
+            let rows = branches::rows(
+                &self.snapshot.references,
+                &indices,
+                delimiter,
+                &self.collapsed_branches[cache],
+                !self.search(panel).is_empty(),
+            );
+            if let Some((path, group)) = old {
+                if let Some(index) = rows
+                    .iter()
+                    .position(|row| row.path == path && row.is_group() == group)
+                    .or_else(|| {
+                        rows.iter().rposition(|row| {
+                            row.is_group()
+                                && !delimiter.is_empty()
+                                && (row.path == path
+                                    || path.starts_with(&format!("{}{delimiter}", row.path)))
+                        })
+                    })
+                {
+                    self.selections[selection] = index;
+                }
+            }
+            self.selections[selection] =
+                self.selections[selection].min(rows.len().saturating_sub(1));
+            self.branch_rows_cache[cache] = rows;
+        }
+    }
+    fn navigate_branch_group(&mut self, expand: bool) -> bool {
+        let Some(row) = self.selected_branch_row().cloned() else {
+            return false;
+        };
+        let remote = self.focus == Panel::RemoteBranches;
+        let cache = usize::from(remote);
+        if expand && row.is_group() {
+            if !self.collapsed_branches[cache].remove(&row.path) {
+                let next = self.selected(self.focus) + 1;
+                if self
+                    .branch_rows(remote)
+                    .get(next)
+                    .is_some_and(|child| child.depth > row.depth)
+                {
+                    self.selections[panel_index(self.focus)] = next;
+                }
+            }
+        } else if !expand && row.is_group() && !self.collapsed_branches[cache].contains(&row.path) {
+            self.collapsed_branches[cache].insert(row.path);
+        } else if !expand {
+            let index = self.selected(self.focus);
+            if let Some(parent) = self.branch_rows(remote)[..index]
+                .iter()
+                .rposition(|parent| parent.depth < row.depth)
+            {
+                self.selections[panel_index(self.focus)] = parent;
+            } else {
+                return false;
+            }
+        } else {
+            return false;
+        }
+        self.rebuild_branch_rows();
+        self.dirty = true;
+        true
+    }
     pub fn refs_for(&self, remote: bool) -> Vec<usize> {
         let kind = match (remote, self.branch_tab) {
             (true, _) => RefKind::Remote,
@@ -548,13 +676,15 @@ impl App {
             .and_then(|index| self.snapshot.commits.get(*index))
     }
     pub fn selected_ref(&self) -> Option<&crate::model::Reference> {
-        self.filtered_refs()
-            .get(self.selected(if self.focus == Panel::RemoteBranches {
+        let remote = self.focus == Panel::RemoteBranches;
+        self.branch_rows(remote)
+            .get(self.selected(if remote {
                 Panel::RemoteBranches
             } else {
                 Panel::Branches
             }))
-            .and_then(|index| self.snapshot.references.get(*index))
+            .and_then(|row| row.reference)
+            .and_then(|index| self.snapshot.references.get(index))
     }
     pub fn selected_stash(&self) -> Option<&crate::model::Stash> {
         self.filtered_stashes()
@@ -566,8 +696,8 @@ impl App {
             Panel::Files => self.rows.len(),
             Panel::CommitFiles => self.commit_rows.len(),
             Panel::Branches if self.branch_tab == 3 => self.snapshot.worktrees.len(),
-            Panel::Branches => self.refs_for(false).len(),
-            Panel::RemoteBranches => self.refs_for(true).len(),
+            Panel::Branches => self.branch_rows(false).len(),
+            Panel::RemoteBranches => self.branch_rows(true).len(),
             Panel::Commits => self.filtered_commits().len(),
             Panel::Stash => self.filtered_stashes().len(),
             Panel::Output => self.output.len(),
@@ -577,6 +707,7 @@ impl App {
         }
     }
     pub fn rebuild(&mut self) {
+        self.rebuild_branch_rows();
         let selected = self
             .rows
             .get(self.selected(Panel::Files))
@@ -741,6 +872,7 @@ impl App {
                     let snapshot = Arc::make_mut(&mut self.snapshot);
                     snapshot.references = references;
                     snapshot.head = head;
+                    self.rebuild_branch_rows();
                     self.request_history();
                 }
                 WorkerEvent::Snapshot(id, result) if id == self.workers.refresh.current() => {
@@ -984,6 +1116,12 @@ impl App {
             }
         }
         self.dirty = true;
+    }
+
+    pub fn page_step(&self) -> usize {
+        self.page_sizes[panel_index(self.focus)]
+            .saturating_sub(1)
+            .max(1)
     }
 
     fn scroll_diff(&mut self, delta: isize) {
@@ -1307,6 +1445,49 @@ impl App {
                 }
                 self.modal = Some(Modal::Help { scroll });
             }
+            Modal::Actions {
+                title,
+                items,
+                mut selected,
+            } => {
+                match key.code {
+                    KeyCode::Esc | KeyCode::Char('q') => return Ok(()),
+                    KeyCode::Enter => {
+                        if let Some(item) = items.get(selected) {
+                            return self.key(item.event);
+                        }
+                        return Ok(());
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        selected = (selected + 1).min(items.len().saturating_sub(1))
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => selected = selected.saturating_sub(1),
+                    KeyCode::PageDown => {
+                        selected = (selected + 10).min(items.len().saturating_sub(1))
+                    }
+                    KeyCode::PageUp => selected = selected.saturating_sub(10),
+                    KeyCode::Home => selected = 0,
+                    KeyCode::End => selected = items.len().saturating_sub(1),
+                    _ => {
+                        let modifiers = if matches!(key.code, KeyCode::Char(character) if character.is_uppercase())
+                        {
+                            key.modifiers - KeyModifiers::SHIFT
+                        } else {
+                            key.modifiers
+                        };
+                        if let Some(item) = items.iter().find(|item| {
+                            item.event.code == key.code && item.event.modifiers == modifiers
+                        }) {
+                            return self.key(item.event);
+                        }
+                    }
+                }
+                self.modal = Some(Modal::Actions {
+                    title,
+                    items,
+                    selected,
+                });
+            }
             Modal::Message(message) => {
                 if !matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q')) {
                     self.modal = Some(Modal::Message(message));
@@ -1402,6 +1583,23 @@ impl App {
                     index: 0,
                 });
             }
+            return Ok(());
+        }
+        if self.is("universal", "contextActions", &["O"], key)
+            || (key_matches("o", key) && !actions::file_opener_context(self))
+        {
+            self.modal = Some(Modal::Actions {
+                title: format!(
+                    "Actions · {}",
+                    if self.focus == Panel::Commits && self.graph_working_tree {
+                        "Working tree / Index"
+                    } else {
+                        self.focus.title()
+                    }
+                ),
+                items: actions::for_app(self),
+                selected: 0,
+            });
             return Ok(());
         }
         for (number, panel) in [
@@ -1500,6 +1698,12 @@ impl App {
                 if let Some(row) = self.row() {
                     self.marked.insert(row.path.clone());
                 }
+            } else if self.focus == Panel::Commits {
+                self.move_selection(if key.code == KeyCode::Down {
+                    self.page_step() as isize
+                } else {
+                    -(self.page_step() as isize)
+                });
             }
             return Ok(());
         }
@@ -1507,7 +1711,7 @@ impl App {
             if self.focus == Panel::Diff {
                 self.scroll_diff(-(self.diff_view_height.saturating_sub(1).max(1) as isize));
             } else {
-                self.move_selection(-15);
+                self.move_selection(-(self.page_step() as isize));
             }
             return Ok(());
         }
@@ -1517,7 +1721,7 @@ impl App {
             if self.focus == Panel::Diff {
                 self.scroll_diff(self.diff_view_height.saturating_sub(1).max(1) as isize);
             } else {
-                self.move_selection(15);
+                self.move_selection(self.page_step() as isize);
             }
             return Ok(());
         }
@@ -1538,6 +1742,7 @@ impl App {
         {
             if self.focus == Panel::Diff && key.code != KeyCode::Tab {
                 self.next_hunk(1);
+            } else if key.code != KeyCode::Tab && self.navigate_branch_group(true) {
             } else if matches!(self.focus, Panel::Files | Panel::CommitFiles)
                 && key.code != KeyCode::Tab
                 && self.row().is_some_and(|row| row.directory)
@@ -1556,6 +1761,7 @@ impl App {
         {
             if self.focus == Panel::Diff && key.code != KeyCode::BackTab {
                 self.next_hunk(-1);
+            } else if key.code != KeyCode::BackTab && self.navigate_branch_group(false) {
             } else if matches!(self.focus, Panel::Files | Panel::CommitFiles)
                 && key.code != KeyCode::BackTab
                 && self.row().is_some_and(|row| row.directory)
@@ -1581,6 +1787,8 @@ impl App {
                     };
                     self.selections[2] = 0;
                     self.scrolls[2] = 0;
+                    self.branch_rows_cache[0].clear();
+                    self.rebuild_branch_rows();
                 }
                 Panel::Commits => {
                     self.commit_tab = 1 - self.commit_tab;
@@ -2016,6 +2224,33 @@ impl App {
             }
             return Ok(());
         }
+        if let Some(row) = self
+            .selected_branch_row()
+            .filter(|row| row.is_group())
+            .cloned()
+        {
+            if key_matches("<enter>", key) {
+                let cache = usize::from(self.focus == Panel::RemoteBranches);
+                if !self.collapsed_branches[cache].remove(&row.path) {
+                    self.collapsed_branches[cache].insert(row.path);
+                }
+                self.rebuild_branch_rows();
+                return Ok(());
+            }
+            if key_matches("<space>", key) {
+                let references: Vec<_> = row
+                    .descendants
+                    .iter()
+                    .map(|index| self.snapshot.references[*index].clone())
+                    .collect();
+                self.toggle_branch_visibility(&references);
+                return Ok(());
+            }
+        }
+        if key_matches("f", key) {
+            self.run_operation(Operation::git(["fetch", "--all", "--prune", "--progress"]));
+            return Ok(());
+        }
         let reference = self.selected_ref().cloned();
         if self.is("universal", "new", &["n"], key) {
             self.prompt_for(Prompt::Branch(
@@ -2030,7 +2265,7 @@ impl App {
             self.run_operation(Operation::git(["switch", "-"]));
         } else if let Some(reference) = reference {
             if key_matches("<space>", key) {
-                self.toggle_branch_visibility(&reference);
+                self.toggle_branch_visibility(std::slice::from_ref(&reference));
             } else if key_matches("<enter>", key) {
                 let operation = match reference.kind {
                     RefKind::Branch => Operation::git(["switch", "--", &reference.name]),

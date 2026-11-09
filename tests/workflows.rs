@@ -1139,3 +1139,40 @@ fn commit_inspection_keeps_the_complete_message_body() {
     assert_eq!(inspection.details.oid, oid);
     assert_eq!(inspection.files.len(), 1);
 }
+
+#[test]
+fn history_keeps_committer_identity_and_date_separate_from_the_author() {
+    let fixture = Fixture::new();
+    fixture.write("file", "content\n");
+    git(fixture.dir.path(), ["add", "file"]);
+    let output = Command::new("git")
+        .args(["commit", "-qm", "Distinct identities"])
+        .current_dir(fixture.dir.path())
+        .env("GIT_AUTHOR_NAME", "Original Author")
+        .env("GIT_AUTHOR_EMAIL", "author@example.invalid")
+        .env("GIT_AUTHOR_DATE", "2020-02-01T12:00:00+00:00")
+        .env("GIT_COMMITTER_NAME", "Jane Mary Smith")
+        .env("GIT_COMMITTER_EMAIL", "committer@example.invalid")
+        .env("GIT_COMMITTER_DATE", "2026-11-26T15:00:00+02:00")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let commits = fixture
+        .repo
+        .commits(
+            &ReadOptions {
+                graph: true,
+                ..ReadOptions::default()
+            },
+            &Cancellation::default(),
+        )
+        .unwrap();
+    assert_eq!(commits[0].author, "Original Author");
+    assert!(commits[0].date.starts_with("2020-02-01"));
+    assert_eq!(commits[0].committer, "Jane Mary Smith");
+    assert!(commits[0].committed_at.starts_with("2026-11-26"));
+}

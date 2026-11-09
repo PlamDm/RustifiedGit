@@ -1,4 +1,5 @@
 use crate::{
+    actions,
     app::{App, Modal, panel_index, strip_ansi},
     model::Panel,
     tree::Row,
@@ -274,38 +275,75 @@ fn draw_refs(frame: &mut Frame, area: Rect, app: &mut App, remote: bool) {
         );
         return;
     }
-    let indices = app.refs_for(remote);
+    let total = app.branch_rows(remote).len();
     let range = viewport(
         app,
         panel,
-        indices.len(),
+        total,
         selected,
         area.height.saturating_sub(2) as usize,
     );
-    let items = indices[range.clone()]
+    let items = app.branch_rows(remote)[range.clone()]
         .iter()
-        .map(|index| {
-            let reference = &app.snapshot.references[*index];
+        .map(|row| {
+            let enabled = row
+                .descendants
+                .iter()
+                .filter(|index| app.branch_visible(&app.snapshot.references[**index]))
+                .count();
+            let all = enabled == row.descendants.len();
+            let expanded = !app.collapsed_branches[usize::from(remote)].contains(&row.path)
+                || !app.search(panel).is_empty();
+            let reference = row
+                .reference
+                .and_then(|index| app.snapshot.references.get(index));
             Line::from(vec![
+                Span::raw("  ".repeat(row.depth)),
                 Span::styled(
-                    if app.branch_visible(reference) {
+                    if all {
                         "[x] "
+                    } else if enabled > 0 {
+                        "[-] "
                     } else {
                         "[ ] "
                     },
-                    Style::default().fg(if app.branch_visible(reference) {
-                        ACCENT
-                    } else {
-                        MUTED
-                    }),
+                    Style::default().fg(if enabled > 0 { ACCENT } else { MUTED }),
                 ),
                 Span::styled(
-                    clean(&reference.name),
+                    if row.is_group() {
+                        if expanded { "▾ " } else { "▸ " }
+                    } else {
+                        "  "
+                    },
+                    Style::default().fg(MUTED),
+                ),
+                Span::styled(
+                    format!(
+                        "{}{}",
+                        clean(&row.label),
+                        if row.is_group() {
+                            app.config.gui.branch_group_delimiter.as_str()
+                        } else {
+                            ""
+                        }
+                    ),
                     Style::default().fg(if remote { Color::Yellow } else { Color::Green }),
                 ),
                 Span::styled(
-                    if reference.current { " *" } else { "" },
+                    if reference.is_some_and(|reference| reference.current) {
+                        " *"
+                    } else {
+                        ""
+                    },
                     Style::default().fg(ACCENT),
+                ),
+                Span::styled(
+                    if row.is_group() {
+                        format!(" ({})", row.descendants.len())
+                    } else {
+                        String::new()
+                    },
+                    Style::default().fg(MUTED),
                 ),
             ])
         })
@@ -465,6 +503,60 @@ fn graph_spans(text: &str) -> Vec<Span<'static>> {
     result
 }
 
+fn initials(name: &str) -> String {
+    let mut words = name
+        .split_whitespace()
+        .filter_map(|word| word.chars().find(|character| character.is_alphanumeric()));
+    let Some(first) = words.next() else {
+        return "??".into();
+    };
+    let last = words.next_back();
+    std::iter::once(first)
+        .chain(last)
+        .flat_map(char::to_uppercase)
+        .collect()
+}
+
+fn short_date(date: &str) -> String {
+    let Some(date) = date.get(..10) else {
+        return "—".into();
+    };
+    let mut fields = date.split('-');
+    let (Some(year), Some(month), Some(day)) = (
+        fields.next(),
+        fields.next().and_then(|value| value.parse::<usize>().ok()),
+        fields.next().and_then(|value| value.parse::<u8>().ok()),
+    ) else {
+        return "—".into();
+    };
+    let months = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    if !(1..=31).contains(&day) {
+        return "—".into();
+    }
+    months
+        .get(month.wrapping_sub(1))
+        .map(|month| format!("{day:02} {month} {year}"))
+        .unwrap_or_else(|| "—".into())
+}
+
+fn fit_spans(spans: Vec<Span<'static>>, width: usize) -> Vec<Span<'static>> {
+    let mut result = Vec::new();
+    let mut remaining = width;
+    for span in spans {
+        let used = span.width();
+        if used > remaining {
+            if remaining > 0 {
+                result.push(Span::styled(elide(&span.content, remaining), span.style));
+            }
+            break;
+        }
+        remaining -= used;
+        result.push(span);
+    }
+    result
+}
 fn draw_graph(frame: &mut Frame, area: Rect, app: &mut App) {
     if area.height < 2 || area.width < 2 {
         return;
@@ -490,6 +582,7 @@ fn draw_graph(frame: &mut Frame, area: Rect, app: &mut App) {
         offset = selected_visual + 1 - height;
     }
     let mut items = Vec::with_capacity(height);
+    let content_width = area.width.saturating_sub(4) as usize;
     for row in rows.iter().skip(offset).take(height) {
         let mut spans = graph_spans(row.prefix);
         if row.logical == Some(0) {
@@ -500,21 +593,51 @@ fn draw_graph(frame: &mut Frame, area: Rect, app: &mut App) {
                 .filter(|file| file.changed())
                 .count();
             spans.push(Span::styled(
-                format!("Working tree / Index ({changed})"),
+                elide(
+                    &format!("Working tree / Index ({changed})"),
+                    content_width.saturating_sub(spans.iter().map(Span::width).sum()),
+                ),
                 Style::default().fg(if changed > 0 { Color::Yellow } else { MUTED }),
             ));
         } else if let Some(index) = row.commit_index {
             let commit = &app.snapshot.commits[index];
+            let metadata = format!(
+                "{} {}",
+                initials(if commit.committer.is_empty() {
+                    &commit.author
+                } else {
+                    &commit.committer
+                }),
+                short_date(if commit.committed_at.is_empty() {
+                    &commit.date
+                } else {
+                    &commit.committed_at
+                })
+            );
+            let metadata = elide(&metadata, content_width);
+            let metadata_width = Line::raw(&metadata).width();
+            let left_width = content_width.saturating_sub(metadata_width + 1);
+            spans = fit_spans(spans, left_width.saturating_sub(3));
             if app.copied_commits.contains(&commit.oid) {
-                spans.push(Span::styled("C ", Style::default().fg(Color::Magenta)));
+                let budget = left_width.saturating_sub(spans.iter().map(Span::width).sum());
+                spans.push(Span::styled(
+                    elide("C ", budget.min(2)),
+                    Style::default().fg(Color::Magenta),
+                ));
             }
+            let available = left_width.saturating_sub(spans.iter().map(Span::width).sum());
+            let hash_budget = available.saturating_sub(3).min(commit.short.len());
             spans.push(Span::styled(
-                format!("{} ", commit.short),
+                if hash_budget > 0 {
+                    format!("{} ", elide(&commit.short, hash_budget))
+                } else {
+                    String::new()
+                },
                 Style::default().fg(Color::Yellow),
             ));
             if !commit.decorations.is_empty() {
                 let used: usize = spans.iter().map(Span::width).sum();
-                let remaining = (area.width as usize).saturating_sub(used + 4);
+                let remaining = left_width.saturating_sub(used);
                 let budget = (remaining / 3).min(26);
                 if budget >= 5 {
                     let labels = clean(&commit.decorations).replace("HEAD -> ", "");
@@ -525,8 +648,19 @@ fn draw_graph(frame: &mut Frame, area: Rect, app: &mut App) {
                 }
             }
             spans.push(Span::styled(
-                clean(&commit.subject),
+                elide(
+                    &clean(&commit.subject),
+                    left_width.saturating_sub(spans.iter().map(Span::width).sum()),
+                ),
                 Style::default().fg(Color::White),
+            ));
+            let used: usize = spans.iter().map(Span::width).sum();
+            spans.push(Span::raw(
+                " ".repeat(content_width.saturating_sub(used + metadata_width)),
+            ));
+            spans.push(Span::styled(
+                metadata,
+                Style::default().fg(Color::LightBlue),
             ));
         }
         items.push(Line::from(spans));
@@ -812,6 +946,22 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         return;
     }
     let areas = areas(area, app);
+    for panel in [
+        Panel::Status,
+        Panel::Branches,
+        Panel::RemoteBranches,
+        Panel::Stash,
+        Panel::Commits,
+        Panel::Details,
+        app.file_panel(),
+        Panel::Diff,
+        Panel::Output,
+    ] {
+        let rect = areas.pane(panel);
+        if rect.height > 2 && rect.width > 2 {
+            app.page_sizes[panel_index(panel)] = rect.height.saturating_sub(2) as usize;
+        }
+    }
     let name = app
         .repo
         .root
@@ -871,28 +1021,36 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     draw_files(frame, areas.files, app);
     draw_diff(frame, areas.diff, app);
     draw_output(frame, areas.output, app);
-    let context_help = match app.focus {
-        Panel::Files => "space stage · c commit · a stage all · F history · Ctrl+s filters",
-        Panel::CommitFiles => "Enter full screen · F history · Ctrl+t difftool · c restore",
-        Panel::Branches | Panel::RemoteBranches => {
-            "space graph on/off · Enter checkout · n new · M merge · r rebase"
-        }
-        Panel::Commits if app.graph_working_tree => {
-            "j/k history · Enter files · c commit · a stage all"
-        }
-        Panel::Commits => "j/k inspect commit · Enter files · C copy · V cherry-pick · i rebase",
-        Panel::Details => "j/k scroll message · Enter files · + zoom",
-        Panel::Stash => "space apply · g pop · d drop · Enter diff",
-        Panel::Diff => {
-            "↑/↓ scroll · PgUp/PgDn page · ←/→ hunks · space stage · a hunk/line · Esc return"
-        }
-        Panel::Output => "j/k scroll · End follow output · Ctrl+c cancel",
-        Panel::Status => "Enter open repository · r repository actions · Ctrl+r recent",
+    let context_actions = actions::for_app(app);
+    let context_help = context_actions
+        .iter()
+        .take(5)
+        .map(|action| format!("{} {}", action.key, action.label))
+        .collect::<Vec<_>>()
+        .join(" · ");
+    let menu_hint = actions::context_key(app)
+        .map(|key| format!("{key} actions · "))
+        .unwrap_or_default();
+    let page_hint = if app.focus == Panel::Commits {
+        "Shift+↑/↓ page · "
+    } else {
+        ""
+    };
+    let description = if let Some(Modal::Actions {
+        items, selected, ..
+    }) = &app.modal
+    {
+        items
+            .get(*selected)
+            .map(|action| action.description.as_str())
+            .unwrap_or("")
+    } else {
+        &app.notice
     };
     frame.render_widget(
         Paragraph::new(vec![
             Line::styled(
-                format!(" {}", clean(&app.notice)),
+                format!(" {}", clean(description)),
                 Style::default().fg(if app.busy.is_some() {
                     Color::Yellow
                 } else {
@@ -900,7 +1058,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                 }),
             ),
             Line::styled(
-                format!(" {context_help} · Tab panes · ? help"),
+                format!(" {menu_hint}{page_hint}{context_help} · Tab panes · ? help"),
                 Style::default().fg(ACCENT),
             ),
         ]),
@@ -991,6 +1149,59 @@ fn draw_modal(frame: &mut Frame, app: &App) {
                 rect,
             );
         }
+        Modal::Actions {
+            title,
+            items,
+            selected,
+        } => {
+            let rect = centered(
+                area,
+                104,
+                (items.len() + 7).min(area.height.saturating_sub(4) as usize) as u16,
+            );
+            frame.render_widget(Clear, rect);
+            let border = block(title.clone(), true);
+            let inner = border.inner(rect);
+            frame.render_widget(border, rect);
+            let regions = Layout::vertical([
+                Constraint::Min(1),
+                Constraint::Length(3),
+                Constraint::Length(1),
+            ])
+            .split(inner);
+            let lines: Vec<_> = items
+                .iter()
+                .map(|item| {
+                    ListItem::new(Line::from(vec![
+                        Span::styled(format!("{:>12}  ", item.key), Style::default().fg(ACCENT)),
+                        Span::raw(clean(&item.label)),
+                    ]))
+                })
+                .collect();
+            let mut state = ListState::default().with_selected(Some(*selected));
+            frame.render_stateful_widget(
+                List::new(lines)
+                    .highlight_style(Style::default().bg(SELECTED))
+                    .highlight_symbol("› "),
+                regions[0],
+                &mut state,
+            );
+            let description = items
+                .get(*selected)
+                .map(|item| clean(&item.description))
+                .unwrap_or_default();
+            frame.render_widget(
+                Paragraph::new(description)
+                    .wrap(Wrap { trim: false })
+                    .style(Style::default().fg(Color::LightBlue)),
+                regions[1],
+            );
+            frame.render_widget(
+                Paragraph::new("↑/↓ choose · Enter or shortcut runs · Esc closes")
+                    .style(Style::default().fg(MUTED)),
+                regions[2],
+            );
+        }
         Modal::Message(message) => {
             let rect = centered(area, 96, 12);
             frame.render_widget(Clear, rect);
@@ -1047,4 +1258,4 @@ pub fn hit_test(area: Rect, app: &App, x: u16, y: u16) -> Option<(Panel, usize)>
     None
 }
 
-pub const HELP: &str = "Numbered panes\n  1 Repositories · 2 Local branches · 3 Remote branches · 4 Stashes\n  5 Commit graph · 6 Commit details · 7 Changed files · 0 Diff · 8 Output\n  Number keys focus panes · Tab/Shift+Tab cycle · + zoom focused pane\n  j/k or arrows move · Home/End/PageUp/PageDown scroll · / search\n  Esc returns · q quits · Ctrl+r recent repos · @ show/hide output\n\nBranches and graph\n  Space toggles a branch in the graph; this does not check it out.\n  Enabled local and remote branches are combined with shared ancestors.\n  Enter checks out the selected branch · * marks the current branch.\n  Branch visibility is saved separately for each repository.\n  j/k in the graph updates details and files without moving focus.\n  Working tree / Index is the first graph row for uncommitted changes.\n  Enter in graph focuses files · Enter on a file opens its diff full screen; Esc returns to files.\n  [ / ] in local branches switches branches/tags/worktrees.\n  [ / ] switches commits/reflog · . loads 1,000 more commits.\n  Older commits load automatically near the end; + means more remain.\n  G builds Git's acceleration cache for large repositories.\n\nWorking files\n  Space stage/unstage · a stage all · c commit · C editor · A amend\n  D reset menu (including submodule stashing/reset) · d discard\n  s stash with untracked · S stash options · i ignore · I show ignored\n  Grave key tree/flat · - collapse · = expand · v mark · Shift+arrows range\n  Ctrl+s file/history filters; turn off changed-only to browse clean files\n  F file history follows renames · e editor · o opener · y copy path\n  Ctrl+t configured difftool · Alt+m mergetool · M conflict menu\n\nDiff\n  ~ saves automatic previews on/off · 0 explicitly opens the full diff\n  Automatic file limit 2 MiB and output limit 512 KiB (configurable)\n  Up/down scroll within hunks · PageUp/PageDown scroll a screen\n  Left/right jump hunks · a hunk/line mode · Space stage/unstage\n  d discard selected change · [ / ] staged/unstaged · { / } context\n  H/L horizontal scroll · Ctrl+w whitespace · n/N next file or search match\n\nHistory and operations\n  Graph: g reset · t revert · C copy · V cherry-pick · F fixup · T tag\n  i interactive rebase · r/R reword/rebase editor · b bisect · y copy hash\n  Branches: n new · c checkout by name · R rename · M merge · r rebase\n  F force checkout · T tag · u upstream · w worktree · d delete\n  Stashes: Space apply · g pop · d drop · Enter diff · s save\n  p pull · P push · R refresh · m continue/abort/skip operation\n  : captured command with live output · ! interactive terminal command\n  Ctrl+c cancels running command · End follows output\n";
+pub const HELP: &str = "Numbered panes\n  1 Repositories · 2 Local branches · 3 Remote branches · 4 Stashes\n  5 Commit graph · 6 Commit details · 7 Changed files · 0 Diff · 8 Output\n  Number keys focus panes · Tab/Shift+Tab cycle · + zoom focused pane\n  O opens context actions; o also works where it is not the file opener.\n  Choose with arrows; Enter/shortcut runs; descriptions appear below.\n  j/k or arrows move · Home/End/PageUp/PageDown scroll · / search\n  Esc returns · q quits · Ctrl+r recent repos · @ show/hide output\n\nBranches and graph\n  Space toggles a branch in the graph; this does not check it out.\n  Enabled local and remote branches are combined with shared ancestors.\n  Slash-delimited branches form nested groups: feature/user/login.\n  Enter toggles groups; Left/Right navigates; Space toggles a whole group.\n  Enter checks out the selected branch · * marks the current branch.\n  Branch visibility is saved separately for each repository.\n  j/k in the graph updates details and files without moving focus.\n  Shift+Up/Down or PageUp/PageDown moves by a visible page of commits.\n  The right edge shows committer initials/date; long subjects end in ….\n  Working tree / Index is the first graph row for uncommitted changes.\n  Enter in graph focuses files · Enter on a file opens its diff full screen; Esc returns to files.\n  [ / ] in local branches switches branches/tags/worktrees.\n  [ / ] switches commits/reflog · . loads 1,000 more commits.\n  Older commits load automatically near the end; + means more remain.\n  G builds Git's acceleration cache for large repositories.\n\nWorking files\n  Space stage/unstage · a stage all · c commit · C editor · A amend\n  D reset menu (including submodule stashing/reset) · d discard\n  s stash with untracked · S stash options · i ignore · I show ignored\n  Grave key tree/flat · - collapse · = expand · v mark · Shift+arrows range\n  Ctrl+s file/history filters; turn off changed-only to browse clean files\n  F file history follows renames · e editor · o opener · y copy path\n  Ctrl+t configured difftool · Alt+m mergetool · M conflict menu\n\nDiff\n  ~ saves automatic previews on/off · 0 explicitly opens the full diff\n  Automatic file limit 2 MiB and output limit 512 KiB (configurable)\n  Up/down scroll within hunks · PageUp/PageDown scroll a screen\n  Left/right jump hunks · a hunk/line mode · Space stage/unstage\n  d discard selected change · [ / ] staged/unstaged · { / } context\n  H/L horizontal scroll · Ctrl+w whitespace · n/N next file or search match\n\nHistory and operations\n  Graph: g reset · t revert · C copy · V cherry-pick · F fixup · T tag\n  i interactive rebase · r/R reword/rebase editor · b bisect · y copy hash\n  Branches: n new · c checkout by name · R rename · M merge · r rebase\n  F force checkout · T tag · u upstream · w worktree · d delete\n  Stashes: Space apply · g pop · d drop · Enter diff · s save\n  p pull · P push · R refresh · m continue/abort/skip operation\n  : captured command with live output · ! interactive terminal command\n  Ctrl+c cancels running command · End follows output\n";

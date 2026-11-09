@@ -52,6 +52,32 @@ out** the branch. The graph combines enabled refs and their shared ancestors
 without duplicate commits, preserving Git's merge connections. Visibility is
 saved per repository. Initially the graph shows the current branch.
 
+Graph rows reserve the right edge for the committer's initials and a date such
+as `PD 26 Nov 2026`. Long subjects end with an ellipsis before those columns;
+the details pane keeps the full message. Initials and dates use the committer,
+which may differ from the original author when changes are cherry-picked.
+
+Local and remote branches form nested groups separated by `/`: a branch named
+`feature/user/login` appears under `feature/` → `user/` → `login`. Remotes add a
+top-level group such as `origin/`. `Enter` expands/collapses a group;
+Left/Right navigates its hierarchy. Space enables all branches in a group, or
+disables them when all are enabled. On a branch leaf, Enter still checks out
+that branch. Searching reveals matching branches inside collapsed groups.
+Set `gui.branchGroupDelimiter` to another separator, or an empty string for a flat list.
+
+`Shift+Up`/`Shift+Down` in the graph moves by approximately one visible page of
+commits; the step adapts to pane height and zoom. Plain arrows move one row.
+PageUp/PageDown also adapt to the focused pane's height. Shift+arrows in the
+working-file pane keep their range-selection behavior.
+
+`O` opens the focused pane's executable actions, with shortcuts and a description
+of the selected action. `o` also opens actions where it has no file-opening
+role. In working files, committed files, diff views and the graph's working-tree
+row, `o` keeps its external file opener behavior. Use Up/Down to choose an action,
+Enter or its shortcut to run it, and Esc to close. The bottom hints come from
+the same action list. Menus honor key remaps, disabled bindings and custom
+commands; repository-changing actions retain their existing confirmations.
+
 Move with `j`/`k` in pane 5 to update the full commit message, metadata, changed
 files and selected file's diff. Focus stays in the graph. `Enter` moves to files;
 another `Enter` opens the file's diff full screen. `Esc` restores the pane layout
@@ -126,6 +152,7 @@ not interpret every upstream LazyGit YAML setting; see the compatibility table.
 gui:
   showUnchangedFiles: true
   showFileTree: true
+  branchGroupDelimiter: '/'
   diffPreviewMaxFileBytes: 2097152
   diffPreviewMaxBytes: 524288
   sidePanelWidth: 0.32
@@ -186,6 +213,8 @@ results. See [PERFORMANCE.md](PERFORMANCE.md) for recorded measurements.
   process-group cleanup.
 - `worker.rs`: independent history/status/preview reads and serialized write jobs.
 - `tree.rs`: directory aggregation, clean/ignored styling metadata and filters.
+- `branches.rs`: recursive branch groups and collapsed/searchable rows.
+- `actions.rs`: available context commands shared by action menus and bottom hints.
 - `patch.rs`: complete hunk and selected-line patches applied by `git apply`.
 - `app.rs`: state transitions, keybindings, dialogs and command dispatch.
 - `ui.rs`: Ratatui rendering; only visible file rows and diff lines are styled.
