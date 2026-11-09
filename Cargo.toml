@@ -1,0 +1,32 @@
+[package]
+name = "pd-lazygit"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "A responsive Rust terminal Git client ported from PlamDm/pd_lazygit"
+license = "MIT"
+
+[[bin]]
+name = "pd-lazygit"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+crossterm = "0.28"
+ratatui = "0.29"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+shell-words = "1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

@@ -1,0 +1,25 @@
+gui:
+  showUnchangedFiles: true
+  showFileTree: true
+  diffPreviewMaxFileBytes: 2097152
+  diffPreviewMaxBytes: 524288
+  sidePanelWidth: 0.32
+  mouseEvents: true
+  commandLogSize: 1000
+git:
+  autoRefresh: true
+  autoFetch: true
+refresher:
+  refreshInterval: 3
+  fetchInterval: 600
+keybinding:
+  files:
+    toggleIgnoredFiles: I
+  universal:
+    toggleDiffPreview: '~'
+customCommands:
+  - key: '<alt+d>'
+    context: files
+    description: Show selected path in an interactive Git diff
+    command: 'git diff -- {{quote .SelectedFile.Name}}'
+    subprocess: true

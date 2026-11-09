@@ -1,0 +1,46 @@
+{
+  "recorded_on": "2026-11-09",
+  "platform": "macOS arm64",
+  "rust_version": "1.88.0",
+  "go_version": "1.27.3",
+  "git_version": "2.56.0",
+  "go_source_commit": "d9cd093e7af6fa0c79c22b62a9113928c8d00d16",
+  "measurement": "process launch to readiness marker received from populated Files panel at 140x40",
+  "startup": [
+    {
+      "tracked_files": 5003,
+      "rust_build": "final release build",
+      "go_ms": [123.245, 78.314, 79.947, 75.213, 77.356],
+      "rust_ms": [37.655, 33.986, 33.680, 33.857, 33.943],
+      "go_median_ms": 78.314,
+      "rust_median_ms": 33.943,
+      "median_ratio": 2.307
+    },
+    {
+      "tracked_files": 20003,
+      "rust_build": "earlier release candidate; same read-worker and tree-rendering architecture",
+      "go_ms": [208.134, 167.503, 162.962],
+      "rust_ms": [295.394, 62.312, 60.346],
+      "go_median_ms": 167.503,
+      "rust_median_ms": 62.312,
+      "median_ratio": 2.688
+    }
+  ],
+  "rust_repository_snapshots": {
+    "iterations": 20,
+    "files": 2572,
+    "references": 5,
+    "commits_loaded": 300,
+    "cold_ms": 32.689875,
+    "median_ms": 19.182333,
+    "p95_ms": 23.395,
+    "min_ms": 17.423125
+  },
+  "limitations": [
+    "Cold-start and filesystem-cache effects vary.",
+    "The larger fixture's first Rust launch was slower than Go.",
+    "The Rust client does not yet have complete upstream LazyGit feature parity.",
+    "No equivalent Go backend snapshot benchmark was measured.",
+    "Runtime verification was performed on macOS; other operating systems were not exercised."
+  ]
+}
