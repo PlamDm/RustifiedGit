@@ -8,7 +8,7 @@ use crossterm::{
     execute,
 };
 use pd_lazygit::{
-    app::{App, panel_index},
+    app::App,
     config::{Config, State},
     git::{ReadOptions, Repository},
     model::Panel,
@@ -109,7 +109,9 @@ fn main() -> Result<()> {
     }
     let state = State::load(&config.directory)?;
     let mut app = App::new(repo, config, state);
-    app.options = options;
+    app.options.history_path = options.history_path;
+    app.options.history_directory = options.history_directory;
+    app.options.commit_limit = options.commit_limit;
     if app.options.history_path.is_some() {
         app.workers.refresh.cancel();
         app.loading = false;
@@ -121,10 +123,8 @@ fn main() -> Result<()> {
         if width > 1000 || height > 1000 {
             bail!("Render dimensions must not exceed 1000");
         }
-        app.snapshot =
-            std::sync::Arc::new(app.repo.snapshot(&app.options, &Cancellation::default())?);
+        app.apply_snapshot(app.repo.snapshot(&app.options, &Cancellation::default())?);
         app.loading = false;
-        app.rebuild();
         app.preview = app.repo.preview(
             &pd_lazygit::model::PreviewTarget::Status,
             false,
@@ -235,7 +235,7 @@ fn run(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
             }
         }
         if event::poll(Duration::from_millis(
-            if app.loading || app.preview_loading || app.busy.is_some() {
+            if app.loading || app.inspection_loading || app.preview_loading || app.busy.is_some() {
                 16
             } else {
                 40
@@ -256,14 +256,14 @@ fn run(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
                             mouse.column,
                             mouse.row,
                         ) {
-                            app.set_focus(panel);
                             if panel == Panel::Diff {
+                                app.set_focus(panel);
                                 app.diff_line =
                                     index.min(app.preview_lines.len().saturating_sub(1));
-                            } else if panel != Panel::Output {
-                                app.selections[panel_index(panel)] = index;
-                                app.rebuild();
-                                app.request_preview(false);
+                            } else if matches!(panel, Panel::Output | Panel::Details) {
+                                app.set_focus(panel);
+                            } else {
+                                app.select_list_row(panel, index);
                             }
                         }
                     }

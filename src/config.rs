@@ -118,6 +118,7 @@ pub struct State {
     pub show_ignored: bool,
     pub recent_repos: Vec<PathBuf>,
     pub hide_command_log: bool,
+    pub visible_branches: BTreeMap<String, Vec<String>>,
 }
 impl Default for State {
     fn default() -> Self {
@@ -125,7 +126,8 @@ impl Default for State {
             diff_preview_enabled: true,
             show_ignored: false,
             recent_repos: Vec::new(),
-            hide_command_log: false,
+            hide_command_log: true,
+            visible_branches: BTreeMap::new(),
         }
     }
 }

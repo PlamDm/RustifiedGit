@@ -30,7 +30,8 @@ def fixture(root, files=3):
         path.write_text(f"line {index}\n")
     (root / "work.txt").write_text("base\n")
     git(root, "add", "--all")
-    git(root, "commit", "-q", "-m", "fixture")
+    # Repeated Zs stay contiguous in Ratatui's incremental terminal updates.
+    git(root, "commit", "-q", "-m", "fixture", "-m", "ZZZZZZZZZZZZ\n\nCommit inspection body.")
 
 
 class Session:
@@ -135,6 +136,8 @@ def main():
         root.mkdir()
         config.mkdir()
         fixture(root)
+        git(root, "branch", "feature")
+        git(root, "update-ref", "refs/remotes/origin/feature", "HEAD")
         (config / "config.yml").write_text("git:\n  autoFetch: false\n  autoRefresh: false\n")
         (root / "work.txt").write_text("updated\n")
         session = Session(args.binary.resolve(), root, config)
@@ -142,7 +145,15 @@ def main():
         try:
             session.until("work.txt")
             ready_ms = round((time.monotonic() - session.started) * 1000, 2)
-            session.send("/work.txt\r")
+            original_head = git(root, "rev-parse", "HEAD")
+            session.send("2/feature\r ")
+            state_file = config / "rust-state.json"
+            eventually(lambda: state_file.exists() and "refs/heads/feature" in json.loads(state_file.read_text())["visibleBranches"].get(str(root.resolve()), []), pump=session.read)
+            assert git(root, "rev-parse", "HEAD") == original_head, "Graph toggle checked out a branch"
+            session.read(0.15)
+            session.send("5j")
+            session.until("ZZZZZZZZZZZZ")
+            session.send("5k7/work.txt\r")
             session.read(0.1)
             session.send(" ")
             eventually(lambda: "work.txt" in git(root, "diff", "--cached", "--name-only"), pump=session.read)
@@ -151,9 +162,8 @@ def main():
             eventually(lambda: git(root, "log", "-1", "--format=%s").strip() == "Rust port smoke commit", pump=session.read)
             session.read(0.2)
             session.send("~")
-            eventually(lambda: (config / "rust-state.json").exists(), pump=session.read)
-            assert json.loads((config / "rust-state.json").read_text())["diffPreviewEnabled"] is False
-            session.send("6:printf '%s%s\\n' LIVE _READY; sleep 2; printf '%s%s\\n' LIVE _DONE\r")
+            eventually(lambda: json.loads(state_file.read_text())["diffPreviewEnabled"] is False, pump=session.read)
+            session.send("8:printf '%s%s\\n' LIVE _READY; sleep 2; printf '%s%s\\n' LIVE _DONE\r")
             session.until("LIVE_READY")
             assert b"LIVE_DONE" not in session.data, "Command output was buffered until completion"
             session.send("\x03")
@@ -161,7 +171,7 @@ def main():
             session.read(0.15)
             session.finish()
             finished = True
-            print(json.dumps({"terminal_smoke": "passed", "ready_ms": ready_ms, "verified": ["file navigation", "staging", "commit", "persisted preview toggle", "live output", "process cancellation", "clean terminal restoration"]}))
+            print(json.dumps({"terminal_smoke": "passed", "ready_ms": ready_ms, "verified": ["branch graph toggle without checkout", "persisted branch visibility", "automatic full commit inspection", "working-tree navigation", "staging", "commit", "persisted preview toggle", "live output", "process cancellation", "clean terminal restoration"]}))
         except Exception:
             session.read(0.1)
             import re

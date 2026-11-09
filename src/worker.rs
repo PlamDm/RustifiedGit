@@ -1,7 +1,7 @@
 use crate::{
     config::GuiConfig,
     git::{Operation, ReadOptions, Repository},
-    model::{FileEntry, Preview, PreviewTarget, Snapshot},
+    model::{CommitInspection, Preview, PreviewTarget, Snapshot},
     process::Cancellation,
 };
 use std::{
@@ -83,7 +83,7 @@ pub struct PreviewRequest {
 pub enum WorkerEvent {
     Snapshot(u64, Result<Snapshot, String>),
     Preview(u64, Result<Preview, String>),
-    CommitFiles(u64, String, Result<Vec<FileEntry>, String>),
+    CommitFiles(u64, String, Result<CommitInspection, String>),
     CommandDone(Result<String, String>),
 }
 
@@ -137,7 +137,7 @@ impl Workers {
         let files_events = events.clone();
         let commit_files = Latest::spawn(move |id, oid: String, cancel: Cancellation| {
             let result = files_repo
-                .commit_files(&oid, &cancel)
+                .inspect_commit(&oid, &cancel)
                 .map_err(|error| format!("{error:#}"));
             if !cancel.is_cancelled() {
                 let _ = files_events.send(WorkerEvent::CommitFiles(id, oid, result));

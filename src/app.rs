@@ -1,7 +1,7 @@
 use crate::{
     config::{Config, CustomCommand, State, key_matches},
     git::{Operation, ReadOptions, Repository, Step, discard_operation, stage_operation},
-    model::{FileEntry, Panel, Preview, PreviewTarget, RefKind, Snapshot},
+    model::{CommitDetails, FileEntry, Panel, Preview, PreviewTarget, RefKind, Snapshot},
     patch::Patch,
     process::{Cancellation, CommandSpec},
     tree::{self, Row, fuzzy_match},
@@ -89,9 +89,15 @@ pub struct App {
     pub commit_rows: Vec<Row>,
     pub commit_files: Vec<FileEntry>,
     pub commit_oid: String,
-    pub selections: [usize; 8],
-    pub scrolls: [usize; 8],
-    pub searches: [String; 8],
+    pub selections: [usize; 10],
+    pub scrolls: [usize; 10],
+    pub searches: [String; 10],
+    pub graph_working_tree: bool,
+    pub commit_details: Option<CommitDetails>,
+    pub details_lines: Vec<String>,
+    pub details_max_scroll: usize,
+    pub inspection_loading: bool,
+    inspection_oid: Option<String>,
     pub collapsed: HashSet<PathBuf>,
     pub marked: HashSet<PathBuf>,
     pub copied_commits: Vec<String>,
@@ -138,6 +144,8 @@ pub fn panel_index(panel: Panel) -> usize {
         Panel::Output => 5,
         Panel::Diff => 6,
         Panel::CommitFiles => 7,
+        Panel::RemoteBranches => 8,
+        Panel::Details => 9,
     }
 }
 
@@ -147,6 +155,11 @@ impl App {
         let options = ReadOptions {
             ignored: state.show_ignored,
             commit_limit: 300,
+            graph: true,
+            visible_refs: state
+                .visible_branches
+                .get(repo.root.to_string_lossy().as_ref())
+                .cloned(),
             ..ReadOptions::default()
         };
         let workers = Workers::new(repo.clone());
@@ -157,14 +170,20 @@ impl App {
             state,
             snapshot: Arc::new(Snapshot::default()),
             workers,
-            focus: Panel::Files,
+            focus: Panel::Commits,
             side: Panel::Files,
             rows: Vec::new(),
             commit_rows: Vec::new(),
             commit_files: Vec::new(),
             commit_oid: String::new(),
-            selections: [0; 8],
-            scrolls: [0; 8],
+            selections: [0; 10],
+            scrolls: [0; 10],
+            graph_working_tree: true,
+            commit_details: None,
+            details_lines: vec!["Working tree / Index".into()],
+            details_max_scroll: 0,
+            inspection_loading: false,
+            inspection_oid: None,
             searches: std::array::from_fn(|_| String::new()),
             collapsed: HashSet::new(),
             marked: HashSet::new(),
@@ -191,11 +210,11 @@ impl App {
             busy: None,
             loading: true,
             preview_loading: false,
-            changed_only: false,
+            changed_only: true,
             fullscreen: false,
             quit: false,
             dirty: true,
-            notice: "? help · 1–6 panels · : command · ~ automatic preview".into(),
+            notice: "1 repos · 2 local · 3 remote · 4 stash · 5 graph · 6 details · 7 files · 0 diff · 8 output".into(),
             options,
             last_refresh: Instant::now(),
             last_fetch: Instant::now(),
@@ -205,6 +224,232 @@ impl App {
 
     fn is(&self, group: &str, action: &str, defaults: &[&str], key: KeyEvent) -> bool {
         self.config.binding(group, action, defaults, key)
+    }
+    pub fn file_panel(&self) -> Panel {
+        if self.graph_working_tree {
+            Panel::Files
+        } else {
+            Panel::CommitFiles
+        }
+    }
+    pub fn branch_visible(&self, reference: &crate::model::Reference) -> bool {
+        self.options
+            .visible_refs
+            .as_ref()
+            .map_or(reference.current, |refs| {
+                refs.contains(&reference.full_name)
+                    || (reference.current && refs.iter().any(|name| name == "HEAD"))
+            })
+    }
+    fn toggle_branch_visibility(&mut self, reference: &crate::model::Reference) {
+        let refs = self.options.visible_refs.get_or_insert_with(Vec::new);
+        if let Some(index) = refs
+            .iter()
+            .position(|name| name == &reference.full_name || (reference.current && name == "HEAD"))
+        {
+            refs.remove(index);
+        } else {
+            refs.push(reference.full_name.clone());
+        }
+        self.state
+            .visible_branches
+            .insert(self.repo.root.to_string_lossy().into_owned(), refs.clone());
+        self.save_state();
+        self.commit_tab = 0;
+        self.loading = false;
+        self.refresh();
+    }
+    pub fn apply_snapshot(&mut self, snapshot: Snapshot) {
+        let selected_oid = self.selected_commit().map(|commit| commit.oid.clone());
+        let files_changed = self.snapshot.files != snapshot.files;
+        self.snapshot = Arc::new(snapshot);
+        if self.options.visible_refs.is_none() {
+            self.options.visible_refs = Some(vec![
+                self.snapshot
+                    .references
+                    .iter()
+                    .find(|reference| reference.current)
+                    .map(|reference| reference.full_name.clone())
+                    .unwrap_or_else(|| "HEAD".into()),
+            ]);
+        }
+        if let Some(oid) = selected_oid {
+            self.selections[3] = self
+                .filtered_commits()
+                .iter()
+                .position(|index| self.snapshot.commits[*index].oid == oid)
+                .unwrap_or(0);
+        }
+        if self.snapshot.commits.is_empty() {
+            self.graph_working_tree = true;
+        }
+        if files_changed {
+            self.rebuild();
+        }
+        self.clamp_selections();
+        self.sync_inspection();
+        self.preview_key = None;
+        self.request_preview(self.focus == Panel::Diff);
+        self.dirty = true;
+    }
+    fn clamp_selections(&mut self) {
+        for panel in [
+            Panel::Status,
+            Panel::Files,
+            Panel::CommitFiles,
+            Panel::Branches,
+            Panel::RemoteBranches,
+            Panel::Commits,
+            Panel::Stash,
+        ] {
+            let index = panel_index(panel);
+            self.selections[index] =
+                self.selections[index].min(self.length(panel).saturating_sub(1));
+        }
+    }
+    fn rebuild_commit_rows(&mut self) {
+        self.commit_rows = tree::rows(
+            &self.commit_files,
+            self.config.gui.show_file_tree,
+            true,
+            &self.collapsed,
+            self.search(Panel::CommitFiles),
+            false,
+        );
+    }
+    fn update_details(&mut self) {
+        self.details_lines = if self.graph_working_tree {
+            vec![
+                "Working tree / Index".into(),
+                String::new(),
+                format!("Branch: {}", self.snapshot.branch),
+                format!(
+                    "{} changed files · {} staged",
+                    self.snapshot
+                        .files
+                        .iter()
+                        .filter(|file| file.changed())
+                        .count(),
+                    self.snapshot
+                        .files
+                        .iter()
+                        .filter(|file| file.staged())
+                        .count()
+                ),
+                String::new(),
+                "c commit · C editor · A amend".into(),
+                "7 inspect files · 0 inspect diff".into(),
+            ]
+        } else if let Some(commit) = self.selected_commit() {
+            if let Some(details) = self
+                .commit_details
+                .as_ref()
+                .filter(|details| details.oid == commit.oid)
+            {
+                let mut lines: Vec<String> = details.message.lines().map(str::to_owned).collect();
+                lines.extend([
+                    String::new(),
+                    format!("Commit {}", details.oid),
+                    format!("Author: {} <{}>", details.author, details.author_email),
+                    format!(
+                        "Committer: {} <{}>",
+                        details.committer, details.committer_email
+                    ),
+                    format!("Date: {}", details.committed_at),
+                    format!("Parents: {}", details.parents.join(" ")),
+                    format!("{} changed files", self.commit_files.len()),
+                ]);
+                lines
+            } else {
+                vec![
+                    format!("Commit {}", commit.oid),
+                    format!("Author: {}", commit.author),
+                    format!("Date: {}", commit.date),
+                    String::new(),
+                    commit.subject.clone(),
+                    String::new(),
+                    "Loading full message and changed files…".into(),
+                ]
+            }
+        } else {
+            vec![
+                "No commit selected".into(),
+                "Space on a branch toggles its graph visibility.".into(),
+            ]
+        };
+    }
+    fn sync_inspection(&mut self) {
+        if !self.graph_working_tree && self.selected_commit().is_none() {
+            self.graph_working_tree = true;
+        }
+        if self.graph_working_tree {
+            if self.inspection_oid.take().is_some() {
+                self.workers.commit_files.cancel();
+                self.commit_files.clear();
+                self.commit_rows.clear();
+                self.commit_oid.clear();
+            }
+            self.commit_details = None;
+            self.inspection_loading = false;
+            if self.focus == Panel::CommitFiles {
+                self.focus = Panel::Files;
+            }
+            if self.focus != Panel::Stash {
+                self.side = Panel::Files;
+            }
+        } else if let Some(oid) = self.selected_commit().map(|commit| commit.oid.clone()) {
+            if self.inspection_oid.as_ref() != Some(&oid) {
+                self.inspection_oid = Some(oid.clone());
+                self.commit_oid = oid.clone();
+                self.commit_files.clear();
+                self.commit_rows.clear();
+                self.commit_details = None;
+                self.inspection_loading = true;
+                self.selections[7] = 0;
+                self.scrolls[7] = 0;
+                self.scrolls[9] = 0;
+                self.workers.commit_files.submit(oid);
+            }
+            if self.focus != Panel::Stash {
+                self.side = Panel::CommitFiles;
+            }
+        } else {
+            self.workers.commit_files.cancel();
+            self.inspection_loading = false;
+            self.commit_files.clear();
+            self.commit_rows.clear();
+            self.commit_details = None;
+            self.inspection_oid = None;
+        }
+        self.update_details();
+    }
+    pub fn select_graph_row(&mut self, logical_index: usize) {
+        self.focus = Panel::Commits;
+        self.graph_working_tree = logical_index == 0;
+        self.selections[3] = logical_index
+            .saturating_sub(1)
+            .min(self.length(Panel::Commits).saturating_sub(1));
+        self.sync_inspection();
+        self.preview_key = None;
+        self.diff_line = 0;
+        self.diff_scroll = 0;
+        self.request_preview(false);
+        self.dirty = true;
+    }
+    pub fn select_list_row(&mut self, panel: Panel, index: usize) {
+        if panel == Panel::Commits {
+            self.select_graph_row(index);
+            return;
+        }
+        self.set_focus(panel);
+        self.selections[panel_index(panel)] = index.min(self.length(panel).saturating_sub(1));
+        if !matches!(
+            panel,
+            Panel::Status | Panel::Branches | Panel::RemoteBranches | Panel::Details
+        ) {
+            self.request_preview(false);
+        }
+        self.dirty = true;
     }
     pub fn selected(&self, panel: Panel) -> usize {
         self.selections[panel_index(panel)]
@@ -220,17 +465,25 @@ impl App {
         }
     }
     pub fn filtered_refs(&self) -> Vec<usize> {
-        let kind = match self.branch_tab {
-            1 => RefKind::Remote,
-            2 => RefKind::Tag,
+        self.refs_for(self.focus == Panel::RemoteBranches)
+    }
+    pub fn refs_for(&self, remote: bool) -> Vec<usize> {
+        let kind = match (remote, self.branch_tab) {
+            (true, _) => RefKind::Remote,
+            (false, 2) => RefKind::Tag,
             _ => RefKind::Branch,
+        };
+        let panel = if remote {
+            Panel::RemoteBranches
+        } else {
+            Panel::Branches
         };
         self.snapshot
             .references
             .iter()
             .enumerate()
             .filter(|(_, reference)| {
-                reference.kind == kind && fuzzy_match(&reference.name, self.search(Panel::Branches))
+                reference.kind == kind && fuzzy_match(&reference.name, self.search(panel))
             })
             .map(|(index, _)| index)
             .collect()
@@ -259,13 +512,20 @@ impl App {
             .collect()
     }
     pub fn selected_commit(&self) -> Option<&crate::model::Commit> {
+        if self.graph_working_tree {
+            return None;
+        }
         self.filtered_commits()
             .get(self.selected(Panel::Commits))
             .and_then(|index| self.snapshot.commits.get(*index))
     }
     pub fn selected_ref(&self) -> Option<&crate::model::Reference> {
         self.filtered_refs()
-            .get(self.selected(Panel::Branches))
+            .get(self.selected(if self.focus == Panel::RemoteBranches {
+                Panel::RemoteBranches
+            } else {
+                Panel::Branches
+            }))
             .and_then(|index| self.snapshot.references.get(*index))
     }
     pub fn selected_stash(&self) -> Option<&crate::model::Stash> {
@@ -278,12 +538,14 @@ impl App {
             Panel::Files => self.rows.len(),
             Panel::CommitFiles => self.commit_rows.len(),
             Panel::Branches if self.branch_tab == 3 => self.snapshot.worktrees.len(),
-            Panel::Branches => self.filtered_refs().len(),
+            Panel::Branches => self.refs_for(false).len(),
+            Panel::RemoteBranches => self.refs_for(true).len(),
             Panel::Commits => self.filtered_commits().len(),
             Panel::Stash => self.filtered_stashes().len(),
             Panel::Output => self.output.len(),
             Panel::Diff => self.preview_lines.len(),
-            Panel::Status => 1,
+            Panel::Status => self.state.recent_repos.len(),
+            Panel::Details => self.details_lines.len(),
         }
     }
     pub fn rebuild(&mut self) {
@@ -304,25 +566,8 @@ impl App {
                 self.selections[1] = index;
             }
         }
-        self.commit_rows = tree::rows(
-            &self.commit_files,
-            self.config.gui.show_file_tree,
-            true,
-            &self.collapsed,
-            self.search(Panel::CommitFiles),
-            false,
-        );
-        for panel in [
-            Panel::Files,
-            Panel::CommitFiles,
-            Panel::Branches,
-            Panel::Commits,
-            Panel::Stash,
-        ] {
-            let index = panel_index(panel);
-            self.selections[index] =
-                self.selections[index].min(self.length(panel).saturating_sub(1));
-        }
+        self.rebuild_commit_rows();
+        self.clamp_selections();
         self.dirty = true;
     }
 
@@ -374,6 +619,7 @@ impl App {
     pub fn request_preview(&mut self, explicit: bool) {
         let Some(target) = self.target() else {
             self.workers.preview.cancel();
+            self.preview_loading = false;
             self.preview_key = None;
             self.preview_lines = vec!["No selection".into()];
             self.preview = Preview::default();
@@ -386,6 +632,7 @@ impl App {
             && matches!(self.side, Panel::Files | Panel::CommitFiles)
         {
             self.workers.preview.cancel();
+            self.preview_loading = false;
             self.preview_key = None;
             self.preview = Preview::default();
             self.patch = Patch::default();
@@ -426,15 +673,7 @@ impl App {
                 WorkerEvent::Snapshot(id, result) if id == self.workers.refresh.current() => {
                     self.loading = false;
                     match result {
-                        Ok(snapshot) => {
-                            let files_changed = self.snapshot.files != snapshot.files;
-                            self.snapshot = Arc::new(snapshot);
-                            if files_changed {
-                                self.rebuild();
-                            }
-                            self.preview_key = None;
-                            self.request_preview(self.focus == Panel::Diff);
-                        }
+                        Ok(snapshot) => self.apply_snapshot(snapshot),
                         Err(error) => self.error(error),
                     }
                 }
@@ -463,17 +702,25 @@ impl App {
                     }
                 }
                 WorkerEvent::CommitFiles(id, oid, result)
-                    if id == self.workers.commit_files.current() =>
+                    if id == self.workers.commit_files.current()
+                        && self.inspection_oid.as_ref() == Some(&oid) =>
                 {
                     match result {
-                        Ok(files) => {
-                            self.commit_files = files;
+                        Ok(inspection) => {
+                            self.inspection_loading = false;
+                            self.commit_files = inspection.files;
+                            self.commit_details = Some(inspection.details);
                             self.commit_oid = oid;
                             self.selections[7] = 0;
-                            self.rebuild();
-                            self.set_focus(Panel::CommitFiles);
+                            self.rebuild_commit_rows();
+                            self.update_details();
+                            self.preview_key = None;
+                            self.request_preview(self.focus == Panel::Diff);
                         }
-                        Err(error) => self.error(error),
+                        Err(error) => {
+                            self.inspection_loading = false;
+                            self.error(error);
+                        }
                     }
                 }
                 WorkerEvent::CommandDone(result) => {
@@ -562,20 +809,47 @@ impl App {
     }
     pub fn set_focus(&mut self, panel: Panel) {
         self.focus = panel;
-        if !matches!(panel, Panel::Diff | Panel::Output) {
+        if matches!(panel, Panel::Files | Panel::CommitFiles) {
             self.side = panel;
             self.diff_line = 0;
             self.diff_scroll = 0;
             self.show_staged = false;
         }
+        if panel == Panel::Commits {
+            self.sync_inspection();
+        }
+        if panel == Panel::Stash {
+            self.side = Panel::Stash;
+        }
         if panel == Panel::Output {
             self.state.hide_command_log = false;
         }
-        self.request_preview(panel == Panel::Diff);
+        if !matches!(
+            panel,
+            Panel::Status | Panel::Branches | Panel::RemoteBranches | Panel::Details
+        ) {
+            self.request_preview(panel == Panel::Diff);
+        }
         self.dirty = true;
     }
     fn move_selection(&mut self, delta: isize) {
-        if self.focus == Panel::Diff {
+        if self.focus == Panel::Commits {
+            let old = if self.graph_working_tree {
+                0
+            } else {
+                self.selected(Panel::Commits) + 1
+            };
+            let next = old
+                .saturating_add_signed(delta)
+                .min(self.length(Panel::Commits));
+            if next != old {
+                self.select_graph_row(next);
+            }
+        } else if self.focus == Panel::Details {
+            self.scrolls[9] = self.scrolls[9]
+                .saturating_add_signed(delta)
+                .min(self.details_max_scroll);
+        } else if self.focus == Panel::Diff {
             self.diff_line = self
                 .diff_line
                 .saturating_add_signed(delta)
@@ -593,7 +867,12 @@ impl App {
                 .min(self.length(self.focus).saturating_sub(1));
             self.diff_line = 0;
             self.diff_scroll = 0;
-            self.request_preview(false);
+            if !matches!(
+                self.focus,
+                Panel::Status | Panel::Branches | Panel::RemoteBranches
+            ) {
+                self.request_preview(false);
+            }
         }
         self.dirty = true;
     }
@@ -683,7 +962,7 @@ impl App {
             Prompt::CheckoutBranch => "Checkout branch by name",
             Prompt::Tag(_) => "New tag name",
             Prompt::Stash => "Stash message (includes untracked files)",
-            Prompt::Shell(false) => "Run command (live output in panel 6)",
+            Prompt::Shell(false) => "Run command (live output in pane 8)",
             Prompt::Shell(true) => "Run interactive command",
             Prompt::HistoryPath => "Filter commit history by repository-relative path",
             Prompt::Worktree(_) => "New worktree path",
@@ -720,6 +999,10 @@ impl App {
                     self.find_match(true, true);
                 } else {
                     self.rebuild();
+                    if self.focus == Panel::Commits {
+                        self.graph_working_tree = false;
+                        self.sync_inspection();
+                    }
                     self.request_preview(false);
                 }
             }
@@ -777,6 +1060,7 @@ impl App {
                 crate::git::validate_path(&path)?;
                 self.options.history_directory = self.repo.root.join(&path).is_dir();
                 self.options.history_path = Some(path);
+                self.graph_working_tree = false;
                 self.set_focus(Panel::Commits);
                 self.loading = false;
                 self.refresh();
@@ -955,11 +1239,22 @@ impl App {
             } else if self.focus == Panel::CommitFiles {
                 self.set_focus(Panel::Commits);
             } else if !self.search(self.focus).is_empty() {
+                let selected_oid = self.selected_commit().map(|commit| commit.oid.clone());
                 self.searches[panel_index(self.focus)].clear();
                 self.rebuild();
+                if self.focus == Panel::Commits {
+                    if let Some(oid) = selected_oid {
+                        self.selections[3] = self
+                            .filtered_commits()
+                            .iter()
+                            .position(|index| self.snapshot.commits[*index].oid == oid)
+                            .unwrap_or(0);
+                    }
+                    self.sync_inspection();
+                }
                 self.request_preview(false);
             } else {
-                self.set_focus(Panel::Files);
+                self.set_focus(Panel::Commits);
             }
             return Ok(());
         }
@@ -988,11 +1283,13 @@ impl App {
         }
         for (number, panel) in [
             ('1', Panel::Status),
-            ('2', Panel::Files),
-            ('3', Panel::Branches),
-            ('4', Panel::Commits),
-            ('5', Panel::Stash),
-            ('6', Panel::Output),
+            ('2', Panel::Branches),
+            ('3', Panel::RemoteBranches),
+            ('4', Panel::Stash),
+            ('5', Panel::Commits),
+            ('6', Panel::Details),
+            ('7', self.file_panel()),
+            ('8', Panel::Output),
         ] {
             if key.code == KeyCode::Char(number) && key.modifiers.is_empty() {
                 self.set_focus(panel);
@@ -1146,12 +1443,13 @@ impl App {
             let previous = key.code == KeyCode::Char('[');
             match self.focus {
                 Panel::Branches => {
-                    self.branch_tab = if previous {
-                        (self.branch_tab + 3) % 4
-                    } else {
-                        (self.branch_tab + 1) % 4
+                    self.branch_tab = match (self.branch_tab, previous) {
+                        (0, false) | (3, true) => 2,
+                        (2, false) | (0, true) => 3,
+                        _ => 0,
                     };
                     self.selections[2] = 0;
+                    self.scrolls[2] = 0;
                 }
                 Panel::Commits => {
                     self.commit_tab = 1 - self.commit_tab;
@@ -1175,6 +1473,7 @@ impl App {
                 self.options.history_path = Some(row.path);
                 self.options.history_directory = row.directory;
                 self.commit_tab = 0;
+                self.graph_working_tree = false;
                 self.set_focus(Panel::Commits);
                 self.loading = false;
                 self.refresh();
@@ -1186,7 +1485,10 @@ impl App {
             return Ok(());
         }
         if self.is("universal", "refresh", &["R"], key)
-            && !matches!(self.focus, Panel::Branches | Panel::Commits)
+            && !matches!(
+                self.focus,
+                Panel::Branches | Panel::RemoteBranches | Panel::Commits
+            )
         {
             self.loading = false;
             self.refresh();
@@ -1196,7 +1498,9 @@ impl App {
             self.run_operation(Operation::git(["pull"]));
             return Ok(());
         }
-        if self.is("universal", "push", &["P"], key) && self.focus != Panel::Branches {
+        if self.is("universal", "push", &["P"], key)
+            && !matches!(self.focus, Panel::Branches | Panel::RemoteBranches)
+        {
             self.run_operation(Operation::git(["push"]));
             return Ok(());
         }
@@ -1208,10 +1512,23 @@ impl App {
             Panel::Files => self.files_key(key)?,
             Panel::CommitFiles => self.commit_files_key(key)?,
             Panel::Diff => self.diff_key(key)?,
-            Panel::Branches => self.branches_key(key)?,
+            Panel::Branches | Panel::RemoteBranches => self.branches_key(key)?,
+            Panel::Commits if self.graph_working_tree => {
+                if key.code == KeyCode::Enter {
+                    self.set_focus(Panel::Files);
+                } else {
+                    self.files_key(key)?;
+                }
+            }
             Panel::Commits => self.commits_key(key)?,
             Panel::Stash => self.stash_key(key)?,
-            Panel::Status if key.code == KeyCode::Enter => self.repository_menu(),
+            Panel::Status if key.code == KeyCode::Enter => {
+                if let Some(path) = self.state.recent_repos.get(self.selected(Panel::Status)) {
+                    self.pending_repo = Some(path.clone());
+                }
+            }
+            Panel::Status if key.code == KeyCode::Char('r') => self.repository_menu(),
+            Panel::Details if key.code == KeyCode::Enter => self.set_focus(self.file_panel()),
             _ => {}
         }
         Ok(())
@@ -1220,10 +1537,13 @@ impl App {
     fn cycle_panel(&mut self, delta: isize) {
         let panels = [
             Panel::Status,
-            Panel::Files,
             Panel::Branches,
-            Panel::Commits,
+            Panel::RemoteBranches,
             Panel::Stash,
+            Panel::Commits,
+            Panel::Details,
+            self.file_panel(),
+            Panel::Diff,
             Panel::Output,
         ];
         let index = panels
@@ -1481,7 +1801,9 @@ impl App {
             self.request_preview(true);
         } else if key_matches("<space>", key) || key_matches("d", key) {
             if self.side != Panel::Files {
-                bail!("Staging applies to working-tree diffs; select a file in panel 2");
+                bail!(
+                    "Staging applies to working-tree diffs; select Working tree / Index in pane 5, then a file in pane 7"
+                );
             }
             if self.ignore_whitespace {
                 bail!("Turn off whitespace filtering with Ctrl+w before applying a patch");
@@ -1526,7 +1848,7 @@ impl App {
     }
 
     fn branches_key(&mut self, key: KeyEvent) -> Result<()> {
-        if self.branch_tab == 3 {
+        if self.branch_tab == 3 && self.focus == Panel::Branches {
             if let Some(worktree) = self
                 .snapshot
                 .worktrees
@@ -1562,7 +1884,9 @@ impl App {
         } else if self.is("branches", "checkoutPreviousBranch", &["-"], key) {
             self.run_operation(Operation::git(["switch", "-"]));
         } else if let Some(reference) = reference {
-            if key_matches("<space>", key) || key_matches("<enter>", key) {
+            if key_matches("<space>", key) {
+                self.toggle_branch_visibility(&reference);
+            } else if key_matches("<enter>", key) {
                 let operation = match reference.kind {
                     RefKind::Branch => Operation::git(["switch", "--", &reference.name]),
                     RefKind::Remote => Operation::git(["switch", "--track", &reference.full_name]),
@@ -1634,7 +1958,7 @@ impl App {
             return Ok(());
         };
         if key_matches("<enter>", key) {
-            self.workers.commit_files.submit(commit.oid);
+            self.set_focus(Panel::CommitFiles);
         } else if self.is("commits", "checkoutCommit", &["<space>"], key) {
             self.confirm(Operation::git(["switch", "--detach", &commit.oid]));
         } else if self.is("commits", "viewResetOptions", &["g"], key) {

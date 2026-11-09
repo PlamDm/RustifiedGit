@@ -26,6 +26,8 @@ def main():
         (root / "000-ready/marker.txt").write_text("ready\n")
         git(root, "add", "000-ready")
         git(root, "commit", "-q", "-m", "marker")
+        # The graph layout starts with changed files; keep its readiness marker visible.
+        (root / "000-ready/marker.txt").write_text("ready modified\n")
         configs = {}
         for language in ["go", "rust"]:
             config = directory / language
@@ -45,7 +47,7 @@ def main():
                 finally:
                     if not finished:
                         session.close()
-        result = {"fixture_tracked_files": args.files + 3, "runs": args.runs, "measurement": "process launch to readiness marker received from populated Files panel at 140x40", "rust_binary": str(args.rust.resolve()), "go_binary": str(args.go.resolve()), "results": {name: {"median_ms": statistics.median(values), "samples_ms": values} for name, values in timings.items()}}
+        result = {"fixture_tracked_files": args.files + 3, "fixture_dirty_files": 1, "runs": args.runs, "measurement": "process launch to dirty readiness marker received from populated Files pane at 140x40 (each application's default layout)", "rust_binary": str(args.rust.resolve()), "go_binary": str(args.go.resolve()), "results": {name: {"median_ms": statistics.median(values), "samples_ms": values} for name, values in timings.items()}}
         result["go_over_rust_median_ratio"] = round(result["results"]["go"]["median_ms"] / result["results"]["rust"]["median_ms"], 3)
         print(json.dumps(result, indent=2))
 

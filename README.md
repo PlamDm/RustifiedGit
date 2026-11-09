@@ -28,9 +28,44 @@ To open the Rust project itself:
 
 The command is `pd-lazygit`, so your installed Go `lazygit` stays available.
 
+## Numbered panes
+
+The keyboard layout places repository navigation on the left, the commit graph
+in the middle, and commit details and changed files on the right:
+
+```text
+┌ 1 Repositories ┐┌ 5 Commit graph ─────────┐┌ 6 Commit details ┐
+├ 2 Local ──────┤│ Working tree / Index    ││ Message and body │
+│ [x] main      ││ * Merge feature        ││ Author, date, SHA│
+│ [ ] feature   ││ |\                     │├ 7 Changed files ┤
+├ 3 Remote ─────┤│ | * Feature commit     ││ M src/app.rs     │
+│ [ ] origin/…  ││ * | Main commit        ││ A src/ui.rs      │
+├ 4 Stashes ────┤└────────────────────────┴┴──────────────────┤
+│ stash@{0}     │┌ 0 Diff ───────────────────────────────────┤
+└───────────────┘└───────────────────────────────────────────┘
+                  8 Command output (drawer)
+```
+
+Press a number to focus its pane, `Tab`/`Shift+Tab` to cycle, and `+` to zoom.
+In local or remote branches, **Space toggles graph visibility**; **Enter checks
+out** the branch. The graph combines enabled refs and their shared ancestors
+without duplicate commits, preserving Git's merge connections. Visibility is
+saved per repository. Initially the graph shows the current branch.
+
+Move with `j`/`k` in pane 5 to update the full commit message, metadata, changed
+files and selected file's diff. Focus stays in the graph. `Enter` moves to files;
+another `Enter` opens the diff. Pane 6 scrolls wrapped messages and metadata.
+The graph's first row, **Working tree / Index**, shows uncommitted changes in
+the same inspector. Pane 7 initially shows changed files; `Ctrl+s` can turn off
+the changed-only filter to browse the full repository tree.
+
+Local branches also provide tags and worktrees through `[`/`]`. Graph history
+is initially limited to 300 commits; `.` loads more. A search hides graph edges
+between omitted rows. Reflog remains available through `[`/`]` in the graph.
+
 ## Your fork's workflows
 
-- Files includes unchanged tracked files, dimmed with their clean directories.
+- The full repository file view includes unchanged tracked files, dimmed with their clean directories.
   `I` includes ignored files. Staging and discarding exclude ignored files.
 - `F` opens file or directory history. File history follows renames. Use `Ctrl+s`
   to clear the history filter. These actions work from Commit Files too.
@@ -40,7 +75,7 @@ The command is `pd-lazygit`, so your installed Go `lazygit` stays available.
 - `~` saves the automatic preview preference. Automatic file previews inspect
   file/index/object sizes before loading content: 2 MiB per file version and
   512 KiB of diff output by default. Explicit `0`/Enter bypasses those limits.
-- `6` focuses live command output. Long operations run in the background; their
+- `8` focuses live command output. Long operations run in the background; their
   output stays visible. `Ctrl+c` cancels their process group, including child
   Git/SSH/hook processes. Read workers cancel stale selections separately.
 
@@ -93,7 +128,7 @@ keybinding:
     toggleDiffPreview: '~'
 ```
 
-`rust-state.json` stores toggles and recent repositories. Existing `config.yml`
+`rust-state.json` stores toggles, per-repository visible refs and recent repositories. Existing `config.yml`
 and Go `state.yml` files are never overwritten. Destructive Git actions require
 confirmation in the UI. Network and write operations only run after an action
 or an enabled scheduled fetch; repository reads set `GIT_OPTIONAL_LOCKS=0`.

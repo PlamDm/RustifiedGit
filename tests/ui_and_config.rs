@@ -52,7 +52,7 @@ fn tree_preserves_dimming_collapse_search_and_flat_mode() {
     );
     assert_eq!(
         tree::rows(&files, false, true, &HashSet::new(), "", true).len(),
-        1
+        2
     );
 }
 
@@ -177,10 +177,10 @@ fn app() -> (tempfile::TempDir, App) {
 }
 
 #[test]
-fn panel_six_focuses_command_output_and_restores_hidden_output() {
+fn panel_eight_focuses_command_output_and_restores_hidden_output() {
     let (_dir, mut app) = app();
     app.state.hide_command_log = true;
-    app.handle_key(KeyEvent::new(KeyCode::Char('6'), KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Char('8'), KeyModifiers::NONE));
     assert_eq!(app.focus, Panel::Output);
     assert!(!app.state.hide_command_log);
     let mut terminal = Terminal::new(TestBackend::new(100, 32)).unwrap();
@@ -194,6 +194,7 @@ fn panel_six_focuses_command_output_and_restores_hidden_output() {
 fn preview_off_is_respected_and_explicit_opening_is_still_available() {
     let (_dir, mut app) = app();
     app.state.diff_preview_enabled = false;
+    app.changed_only = false;
     app.snapshot = Arc::new(Snapshot {
         files: vec![FileEntry::clean("file".into())],
         ..Snapshot::default()
@@ -266,6 +267,7 @@ fn copied_commits_keep_source_order_after_switching_branch_histories() {
     use pd_lazygit::model::Commit;
     let (_dir, mut app) = app();
     app.focus = Panel::Commits;
+    app.graph_working_tree = false;
     app.snapshot = Arc::new(Snapshot {
         commits: vec![
             Commit {

@@ -157,17 +157,21 @@ pub enum Panel {
     Output,
     Diff,
     CommitFiles,
+    RemoteBranches,
+    Details,
 }
 
 impl Panel {
     pub fn number(self) -> usize {
         match self {
             Self::Status => 1,
-            Self::Files => 2,
-            Self::Branches => 3,
-            Self::Commits => 4,
-            Self::Stash => 5,
-            Self::Output => 6,
+            Self::Files | Self::CommitFiles => 7,
+            Self::Branches => 2,
+            Self::RemoteBranches => 3,
+            Self::Commits => 5,
+            Self::Stash => 4,
+            Self::Details => 6,
+            Self::Output => 8,
             _ => 0,
         }
     }
@@ -181,6 +185,8 @@ impl Panel {
             Self::Output => "commandOutput",
             Self::Diff => "main",
             Self::CommitFiles => "commitFiles",
+            Self::RemoteBranches => "remoteBranches",
+            Self::Details => "commitDetails",
         }
     }
 }

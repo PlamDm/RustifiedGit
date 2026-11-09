@@ -44,7 +44,7 @@ pub fn rows(
 ) -> Vec<Row> {
     let visible = |file: &FileEntry| {
         (show_unchanged || file.changed() || file.ignored())
-            && (!changed_only || file.changed())
+            && (!changed_only || file.changed() || file.ignored())
             && fuzzy_match(&file.path.to_string_lossy(), search)
     };
     if !tree {

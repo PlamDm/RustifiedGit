@@ -8,7 +8,8 @@ Go 1.27.3 and Git 2.56.0. Raw samples are in
 
 The benchmark creates a disposable repository with tracked files, disables
 automatic fetch/refresh and startup popups in both clients, then measures
-process launch to a readiness marker appearing in the Files panel. Both
+process launch to a readiness marker appearing in the Files panel. These samples
+were recorded before the numbered graph layout was introduced. Both
 clients use a real 140×40 PTY. Runs alternate Go and Rust.
 
 | Tracked files | Runs per client | Optimized Go median | Rust release median | Go / Rust ratio |
@@ -16,13 +17,18 @@ clients use a real 140×40 PTY. Runs alternate Go and Rust.
 | 5,003 | 5 | 78.31 ms | 33.94 ms | 2.31× |
 | 20,003 | 3 | 167.50 ms | 62.31 ms | 2.69× |
 
-The 5,003-file measurement uses the final release build. The larger-fixture
+The 5,003-file measurement uses the original port's release build. The larger-fixture
 measurement was collected on an earlier release candidate with the same
 repository-worker/tree/rendering architecture. Its first Rust sample was
 **295.39 ms**, versus **208.13 ms** for Go; subsequent Rust samples were
 62.31 and 60.35 ms. First launches and cold filesystem caches can therefore
 behave differently from the medians. These measurements do not establish
 a universal cold-start speedup.
+
+The current comparison script modifies the marker file so it is visible in the
+new layout's default changed-files pane. Its output identifies the dirty fixture
+and each application's default layout; fresh samples should be kept separate
+from the earlier clean-tree measurements above.
 
 The Go reference is `pd_development` at
 `d9cd093e7af6fa0c79c22b62a9113928c8d00d16`, built with ordinary optimization:
@@ -75,6 +81,6 @@ was measured. It is not a claim that all Git operations became faster.
 - Git is the execution engine for mutations, hooks, signing, credential helpers
   and remotes. Network, filesystem and external-tool costs remain their own.
 
-Correctness and interactive verification: 40 Rust tests, warning-free Clippy,
+Original port verification: 40 Rust tests, warning-free Clippy,
 format checks, an optimized build, and a real-terminal smoke run covering
 navigation, staging, commit, saved settings, live output and cancellation.

@@ -24,7 +24,7 @@ feature parity. This file keeps that boundary explicit.
 | Check worktree, index/conflict stages, committed versions | Native Git metadata queries | Real Git size-limit tests |
 | Stop oversized diff output; explicit preview bypass | Native bounded readers | Real Git preview tests |
 | Show output while a command runs | Native independent command worker | Streaming and PTY tests |
-| Panel 6 focuses command output | Native | UI test |
+| Command output focus | Pane 8 in the new graph layout | UI and PTY tests |
 | Submodule reset/clean stays off UI thread | Native cancellable command jobs | Shared process-group cancellation |
 | Working-tree nuke with submodules | Stash dirty/untracked submodule content, reset submodules, reset HEAD, clean untracked files; keep ignored files | Real Git submodule test |
 
@@ -35,14 +35,14 @@ feature parity. This file keeps that boundary explicit.
 | Files/index | File/directory/range selection, stage/unstage, discarded changes, ignores, editor/opener |
 | Partial changes | Hunk or individual added/removed line staging and unstaging; confirmed discard |
 | Commits | Message/editor, amend, hooks and signing via Git, fixup, revert, cherry-pick copied commits, reset options |
-| History | Paginated commits, reflog, path filter with rename following, commit file list and diffs |
+| History | Graph of enabled local/remote refs, shared ancestors, persisted visibility, paginated commits, reflog, path filter with rename following, automatic full message/file/diff inspection |
 | Branches | Create, checkout/force checkout/previous, rename/delete, merge/rebase, set upstream |
 | Remotes/tags | List remote refs, fetch/pull/push, local tag create/delete, tag push |
 | Worktrees | List, create, open and remove |
 | Stash | Save tracked/untracked/staged/keep-index, preview, apply, pop and drop |
 | Conflict/operation control | External merge tool, ours/theirs, stage resolutions, rebase/merge/cherry-pick/revert continue/abort; bisect controls |
 | Advanced interactive Git | `!` restores the terminal and runs Git/editor interactively, then refreshes |
-| UI | Six panels, keyboard/mouse, fuzzy list filters, resize, fullscreen, horizontal diff scroll, bounded output history |
+| UI | Separate numbered repository/local/remote/stash/graph/details/files/diff panes and output drawer; keyboard/mouse, fuzzy list filters, resize, zoom, wrapped message scrolling, horizontal diff scroll, bounded output history |
 
 ## Remaining upstream compatibility work
 
