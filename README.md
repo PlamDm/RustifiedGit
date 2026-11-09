@@ -56,6 +56,9 @@ Move with `j`/`k` in pane 5 to update the full commit message, metadata, changed
 files and selected file's diff. Focus stays in the graph. `Enter` moves to files;
 another `Enter` opens the file's diff full screen. `Esc` restores the pane layout
 and returns to the same file. Pane 6 scrolls wrapped messages and metadata.
+In a diff, Up/Down or `j`/`k` scroll through a selected hunk immediately;
+PageUp/PageDown scroll by a screen. Left/Right jump between hunks. Press `a`
+to switch to individual-line selection when you want to stage specific lines.
 The graph's first row, **Working tree / Index**, shows uncommitted changes in
 the same inspector. Pane 7 initially shows changed files; `Ctrl+s` can turn off
 the changed-only filter to browse the full repository tree.

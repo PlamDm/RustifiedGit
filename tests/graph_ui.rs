@@ -428,3 +428,82 @@ fn details_scroll_uses_wrapped_rows_and_clamps_when_zoomed() {
     assert_eq!(app.scrolls[9], 0);
     assert_eq!(app.focus, Panel::Details);
 }
+
+#[test]
+fn a_single_large_hunk_scrolls_immediately_and_can_still_be_staged_whole() {
+    let (_dir, mut app, _) = fixture();
+    let contents: String = (1..=200)
+        .map(|line| format!("large-hunk-line-{line:04}\n"))
+        .collect();
+    fs::write(app.repo.root.join("main.txt"), &contents).unwrap();
+    app.refresh();
+    wait(&mut app, |app| !app.loading);
+    key(&mut app, KeyCode::Char('7'));
+    key(&mut app, KeyCode::Enter);
+    wait(&mut app, |app| !app.preview_loading);
+    assert!(app.fullscreen && app.hunk_mode);
+    assert_eq!(app.patch.hunks.len(), 1);
+    screen(&mut app, 120, 30);
+    assert_eq!(app.diff_scroll, 0);
+
+    key(&mut app, KeyCode::Down);
+    screen(&mut app, 120, 30);
+    assert_eq!(
+        app.diff_scroll, 1,
+        "one Down must scroll immediately inside a hunk"
+    );
+    assert_eq!(app.patch.hunk_at(app.diff_line), Some(0));
+    key(&mut app, KeyCode::Up);
+    screen(&mut app, 120, 30);
+    assert_eq!(app.diff_scroll, 0);
+
+    let page = app.diff_view_height - 1;
+    key(&mut app, KeyCode::PageDown);
+    screen(&mut app, 120, 30);
+    assert_eq!(app.diff_scroll, page);
+    key(&mut app, KeyCode::PageUp);
+    screen(&mut app, 120, 30);
+    assert_eq!(app.diff_scroll, 0);
+
+    // Line selection keeps a moving cursor; page keys scroll in either mode.
+    key(&mut app, KeyCode::Home);
+    key(&mut app, KeyCode::Char('a'));
+    key(&mut app, KeyCode::Down);
+    screen(&mut app, 120, 30);
+    assert!(!app.hunk_mode);
+    assert_eq!(app.diff_line, 1);
+    assert_eq!(app.diff_scroll, 0);
+    key(&mut app, KeyCode::PageDown);
+    screen(&mut app, 120, 30);
+    assert_eq!(app.diff_scroll, page);
+    key(&mut app, KeyCode::Char('a'));
+    key(&mut app, KeyCode::Home);
+
+    let mut rendered = String::new();
+    for _ in 0..app.preview_lines.len() + 10 {
+        key(&mut app, KeyCode::Down);
+        rendered = screen(&mut app, 120, 30);
+    }
+    assert!(rendered.contains("+large-hunk-line-0200"), "{rendered}");
+    assert_eq!(app.diff_line, app.preview_lines.len() - 1);
+    assert_eq!(
+        app.diff_scroll,
+        app.preview_lines.len() - app.diff_view_height
+    );
+    let bottom = app.diff_scroll;
+    key(&mut app, KeyCode::Up);
+    screen(&mut app, 120, 30);
+    assert_eq!(app.diff_scroll, bottom - 1);
+    key(&mut app, KeyCode::End);
+    assert!(screen(&mut app, 100, 22).contains("+large-hunk-line-0200"));
+    key(&mut app, KeyCode::PageUp);
+    screen(&mut app, 100, 22);
+    assert_eq!(app.patch.hunk_at(app.diff_line), Some(0));
+    key(&mut app, KeyCode::Char(' '));
+    wait(&mut app, |app| app.busy.is_none() && !app.loading);
+    assert_eq!(
+        git(&app.repo.root, &["show", ":main.txt"]),
+        contents.trim_end()
+    );
+    assert!(git(&app.repo.root, &["diff", "--", "main.txt"]).is_empty());
+}

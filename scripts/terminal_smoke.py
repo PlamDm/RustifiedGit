@@ -139,7 +139,7 @@ def main():
         git(root, "branch", "feature")
         git(root, "update-ref", "refs/remotes/origin/feature", "HEAD")
         (config / "config.yml").write_text("git:\n  autoFetch: false\n  autoRefresh: false\n")
-        (root / "work.txt").write_text("updated\n")
+        (root / "work.txt").write_text("updated\n" + "".join(f"large-hunk-line-{line:04}\n" for line in range(240)) + "QQQQQQQQQQQQ\n")
         session = Session(args.binary.resolve(), root, config)
         finished = False
         try:
@@ -154,6 +154,15 @@ def main():
             session.send("5j")
             session.until("ZZZZZZZZZZZZ")
             session.send("5k7/work.txt\r")
+            session.read(0.1)
+            session.send("\r")
+            session.read(0.1)
+            assert b"QQQQQQQQQQQQ" not in session.data, "Large hunk fixture fits on screen"
+            session.send("\x1b[B" * 270)
+            session.until("QQQQQQQQQQQQ")
+            session.send("\x1b[A")
+            session.read(0.05)
+            session.send("\x1b")
             session.read(0.1)
             session.send(" ")
             eventually(lambda: "work.txt" in git(root, "diff", "--cached", "--name-only"), pump=session.read)
@@ -171,7 +180,7 @@ def main():
             session.read(0.15)
             session.finish()
             finished = True
-            print(json.dumps({"terminal_smoke": "passed", "ready_ms": ready_ms, "verified": ["branch graph toggle without checkout", "persisted branch visibility", "automatic full commit inspection", "working-tree navigation", "staging", "commit", "persisted preview toggle", "live output", "process cancellation", "clean terminal restoration"]}))
+            print(json.dumps({"terminal_smoke": "passed", "ready_ms": ready_ms, "verified": ["branch graph toggle without checkout", "persisted branch visibility", "automatic full commit inspection", "working-tree navigation", "full-screen large hunk keyboard scrolling", "staging", "commit", "persisted preview toggle", "live output", "process cancellation", "clean terminal restoration"]}))
         except Exception:
             session.read(0.1)
             import re

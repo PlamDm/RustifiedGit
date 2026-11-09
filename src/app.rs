@@ -108,6 +108,7 @@ pub struct App {
     pub patch: Patch,
     pub diff_line: usize,
     pub diff_scroll: usize,
+    pub diff_view_height: usize,
     pub horizontal_scroll: usize,
     pub hunk_mode: bool,
     pub diff_context: usize,
@@ -195,6 +196,7 @@ impl App {
             patch: Patch::default(),
             diff_line: 0,
             diff_scroll: 0,
+            diff_view_height: 15,
             horizontal_scroll: 0,
             hunk_mode: true,
             diff_context: 3,
@@ -849,6 +851,8 @@ impl App {
             self.scrolls[9] = self.scrolls[9]
                 .saturating_add_signed(delta)
                 .min(self.details_max_scroll);
+        } else if self.focus == Panel::Diff && self.hunk_mode {
+            self.scroll_diff(delta);
         } else if self.focus == Panel::Diff {
             self.diff_line = self
                 .diff_line
@@ -875,6 +879,19 @@ impl App {
             }
         }
         self.dirty = true;
+    }
+
+    fn scroll_diff(&mut self, delta: isize) {
+        let last_line = self.preview_lines.len().saturating_sub(1);
+        self.diff_line = self.diff_line.saturating_add_signed(delta).min(last_line);
+        let max_scroll = self
+            .preview_lines
+            .len()
+            .saturating_sub(self.diff_view_height.max(1));
+        self.diff_scroll = self
+            .diff_scroll
+            .saturating_add_signed(delta)
+            .min(max_scroll);
     }
     fn prompt(&mut self, title: impl Into<String>, purpose: Prompt, text: String) {
         self.modal = Some(Modal::Input {
@@ -1382,13 +1399,21 @@ impl App {
             return Ok(());
         }
         if self.is("universal", "scrollUpMain", &["<pgup>"], key) || key_matches("<ctrl+u>", key) {
-            self.move_selection(-15);
+            if self.focus == Panel::Diff {
+                self.scroll_diff(-(self.diff_view_height.saturating_sub(1).max(1) as isize));
+            } else {
+                self.move_selection(-15);
+            }
             return Ok(());
         }
         if self.is("universal", "scrollDownMain", &["<pgdown>"], key)
             || key_matches("<ctrl+d>", key)
         {
-            self.move_selection(15);
+            if self.focus == Panel::Diff {
+                self.scroll_diff(self.diff_view_height.saturating_sub(1).max(1) as isize);
+            } else {
+                self.move_selection(15);
+            }
             return Ok(());
         }
         if key_matches("<home>", key) || key_matches("<", key) {
