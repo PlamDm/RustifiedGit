@@ -1006,3 +1006,136 @@ fn headless_cli_renders_loaded_state_and_filters_history() {
     assert!(screen.contains("Repository status"));
     assert!(!screen.contains("Loading repository"));
 }
+
+#[test]
+fn graph_queries_show_the_union_of_enabled_branches_without_checking_them_out() {
+    let fixture = Fixture::new();
+    fixture.write("base", "base");
+    fixture.commit("base");
+    git(fixture.dir.path(), ["switch", "-q", "-c", "left"]);
+    fixture.write("left", "left");
+    fixture.commit("left change");
+    git(fixture.dir.path(), ["switch", "-q", "main"]);
+    fixture.write("right", "right");
+    fixture.commit("right change");
+    let head = git(fixture.dir.path(), ["rev-parse", "HEAD"]);
+    let mut options = ReadOptions {
+        graph: true,
+        visible_refs: Some(vec!["refs/heads/left".into()]),
+        ..ReadOptions::default()
+    };
+    let left = fixture
+        .repo
+        .commits(&options, &Cancellation::default())
+        .unwrap();
+    assert!(left.iter().any(|commit| commit.subject == "left change"));
+    assert!(!left.iter().any(|commit| commit.subject == "right change"));
+    options
+        .visible_refs
+        .as_mut()
+        .unwrap()
+        .push("refs/heads/main".into());
+    let both = fixture
+        .repo
+        .commits(&options, &Cancellation::default())
+        .unwrap();
+    assert_eq!(both.len(), 3);
+    assert!(
+        both.iter()
+            .all(|commit| commit.oid.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    );
+    assert!(both.iter().all(|commit| commit.graph_prefix.contains('*')));
+    for (index, commit) in both.iter().enumerate() {
+        for parent in &commit.parents {
+            assert!(
+                both.iter()
+                    .position(|other| &other.oid == parent)
+                    .is_some_and(|parent_index| parent_index > index)
+            );
+        }
+    }
+    assert_eq!(git(fixture.dir.path(), ["rev-parse", "HEAD"]), head);
+    options.visible_refs = Some(Vec::new());
+    assert!(
+        fixture
+            .repo
+            .commits(&options, &Cancellation::default())
+            .unwrap()
+            .is_empty()
+    );
+    options.visible_refs = Some(vec!["refs/heads/deleted".into()]);
+    assert!(
+        fixture
+            .repo
+            .commits(&options, &Cancellation::default())
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn graph_parser_preserves_merge_connectors_and_commit_message_fields() {
+    let fixture = Fixture::new();
+    fixture.write("base", "base");
+    fixture.commit("base");
+    git(fixture.dir.path(), ["switch", "-q", "-c", "left"]);
+    fixture.write("left", "left");
+    fixture.commit("left");
+    git(fixture.dir.path(), ["switch", "-q", "main"]);
+    fixture.write("right", "right");
+    fixture.commit("right");
+    git(
+        fixture.dir.path(),
+        ["merge", "--no-ff", "left", "-m", "merge"],
+    );
+    let options = ReadOptions {
+        graph: true,
+        visible_refs: Some(vec!["refs/heads/main".into()]),
+        ..ReadOptions::default()
+    };
+    let commits = fixture
+        .repo
+        .commits(&options, &Cancellation::default())
+        .unwrap();
+    assert_eq!(commits.len(), 4);
+    assert_eq!(commits[0].parents.len(), 2);
+    assert_eq!(commits[0].subject, "merge");
+    assert!(
+        commits
+            .iter()
+            .flat_map(|commit| &commit.graph_before)
+            .any(|line| line.contains('\\') || line.contains('/'))
+    );
+    assert!(commits.iter().all(|commit| commit.author == "Port Tests"));
+    let inspection = fixture
+        .repo
+        .inspect_commit(&commits[0].oid, &Cancellation::default())
+        .unwrap();
+    assert_eq!(inspection.details.message, "merge");
+    assert_eq!(inspection.details.author_email, "tests@example.invalid");
+    assert_eq!(inspection.details.parents.len(), 2);
+    assert!(
+        inspection
+            .files
+            .iter()
+            .any(|file| file.path == Path::new("left"))
+    );
+}
+
+#[test]
+fn commit_inspection_keeps_the_complete_message_body() {
+    let fixture = Fixture::new();
+    fixture.write("file", "file");
+    fixture.commit("Subject\n\nDetailed explanation.\nAnother paragraph.");
+    let oid = fixture.snapshot().head;
+    let inspection = fixture
+        .repo
+        .inspect_commit(&oid, &Cancellation::default())
+        .unwrap();
+    assert_eq!(
+        inspection.details.message,
+        "Subject\n\nDetailed explanation.\nAnother paragraph."
+    );
+    assert_eq!(inspection.details.oid, oid);
+    assert_eq!(inspection.files.len(), 1);
+}

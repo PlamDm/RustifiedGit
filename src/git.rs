@@ -1,7 +1,8 @@
 use crate::{
     config::GuiConfig,
     model::{
-        Commit, FileEntry, Preview, PreviewTarget, RefKind, Reference, Snapshot, Stash, Worktree,
+        Commit, CommitDetails, CommitInspection, FileEntry, Preview, PreviewTarget, RefKind,
+        Reference, Snapshot, Stash, Worktree,
     },
     process::{self, Cancellation, CommandSpec, Output, os_path},
 };
@@ -29,6 +30,8 @@ pub struct ReadOptions {
     pub reflog: bool,
     pub all_branches: bool,
     pub commit_limit: usize,
+    pub graph: bool,
+    pub visible_refs: Option<Vec<String>>,
 }
 
 #[derive(Clone)]
@@ -263,6 +266,9 @@ impl Repository {
     }
 
     pub fn commits(&self, options: &ReadOptions, cancel: &Cancellation) -> Result<Vec<Commit>> {
+        if !options.reflog && options.visible_refs.as_ref().is_some_and(Vec::is_empty) {
+            return Ok(Vec::new());
+        }
         let mut args: Vec<OsString> = vec![if options.reflog { "reflog" } else { "log" }.into()];
         if options.reflog {
             args.push("show".into());
@@ -270,9 +276,18 @@ impl Repository {
         args.extend([
             "-z".into(),
             format!("--max-count={}", options.commit_limit.max(300)).into(),
-            "--format=%H%x00%h%x00%s%x00%an%x00%aI%x00%D%x00%P".into(),
+            "--format=%x00%H%x00%h%x00%s%x00%an%x00%aI%x00%D%x00%P%x00".into(),
         ]);
-        if options.all_branches && !options.reflog {
+        if options.graph && !options.reflog {
+            args.extend([
+                "--graph".into(),
+                "--topo-order".into(),
+                "--color=always".into(),
+            ]);
+        }
+        if !options.reflog && options.visible_refs.is_some() {
+            args.extend(["--ignore-missing".into(), "--stdin".into()]);
+        } else if options.all_branches && !options.reflog {
             args.push("--all".into());
         }
         if let Some(path) = &options.history_path {
@@ -281,14 +296,22 @@ impl Repository {
             }
             args.extend(["--".into(), path.as_os_str().to_owned()]);
         }
-        let output = process::run(
-            &self.root,
-            &CommandSpec::git(args),
-            cancel,
-            READ_LIMIT,
-            None,
-            READ_TIMEOUT,
-        )?;
+        let mut command = CommandSpec::git(args);
+        if !options.reflog {
+            if let Some(references) = &options.visible_refs {
+                if references.iter().any(|name| {
+                    name.contains(['\n', '\r', '\0'])
+                        || !(name.starts_with("refs/")
+                            || name == "HEAD"
+                            || (name.len() >= 40
+                                && name.bytes().all(|byte| byte.is_ascii_hexdigit())))
+                }) {
+                    bail!("Invalid graph reference selection");
+                }
+                command.stdin = Some(format!("{}\n", references.join("\n")).into_bytes());
+            }
+        }
+        let output = process::run(&self.root, &command, cancel, READ_LIMIT, None, READ_TIMEOUT)?;
         if output.code != 0 {
             let head = process::run(
                 &self.root,
@@ -788,6 +811,44 @@ impl Repository {
         Ok(result)
     }
 
+    pub fn inspect_commit(&self, oid: &str, cancel: &Cancellation) -> Result<CommitInspection> {
+        let (files, details) = thread::scope(|scope| {
+            let files = scope.spawn(|| self.commit_files(oid, cancel));
+            let output = self.read(
+                [
+                    "show",
+                    "--no-patch",
+                    "--format=%H%x00%B%x00%an%x00%ae%x00%cn%x00%ce%x00%cI%x00%P",
+                    oid,
+                    "--",
+                ],
+                cancel,
+            );
+            (files.join().unwrap(), output)
+        });
+        let details = details?;
+        let fields: Vec<_> = without_newline(&details.stdout)
+            .split(|byte| *byte == 0)
+            .collect();
+        if fields.len() != 8 {
+            bail!("Invalid commit detail response");
+        }
+        let field = |index| String::from_utf8_lossy(fields[index]).into_owned();
+        Ok(CommitInspection {
+            files: files?,
+            details: CommitDetails {
+                oid: field(0),
+                message: field(1).trim_end().to_owned(),
+                author: field(2),
+                author_email: field(3),
+                committer: field(4),
+                committer_email: field(5),
+                committed_at: field(6),
+                parents: field(7).split_whitespace().map(str::to_owned).collect(),
+            },
+        })
+    }
+
     pub fn execute(
         &self,
         operation: &Operation,
@@ -1045,14 +1106,19 @@ pub fn parse_status(bytes: &[u8]) -> Result<(Vec<FileEntry>, String)> {
 }
 
 pub fn parse_commits(bytes: &[u8]) -> Vec<Commit> {
-    bytes
-        .split(|byte| *byte == 0)
-        .collect::<Vec<_>>()
-        .chunks_exact(7)
-        .filter(|fields| !fields[0].is_empty())
-        .map(|fields| {
-            let text = |index: usize| String::from_utf8_lossy(fields[index]).into_owned();
-            Commit {
+    let fields: Vec<_> = bytes.split(|byte| *byte == 0).collect();
+    let mut commits = Vec::new();
+    let mut graph = Vec::new();
+    let mut index = 0;
+    while index < fields.len() {
+        let field = fields[index];
+        if matches!(field.len(), 40 | 64)
+            && field.iter().all(u8::is_ascii_hexdigit)
+            && index + 6 < fields.len()
+        {
+            let text = |offset: usize| String::from_utf8_lossy(fields[index + offset]).into_owned();
+            let graph_prefix = graph.pop().unwrap_or_default();
+            commits.push(Commit {
                 oid: text(0),
                 short: text(1),
                 subject: text(2),
@@ -1060,7 +1126,19 @@ pub fn parse_commits(bytes: &[u8]) -> Vec<Commit> {
                 date: text(4),
                 decorations: text(5),
                 parents: text(6).split_whitespace().map(str::to_owned).collect(),
-            }
-        })
-        .collect()
+                graph_prefix,
+                graph_before: std::mem::take(&mut graph),
+            });
+            index += 7;
+        } else {
+            graph.extend(
+                String::from_utf8_lossy(field)
+                    .split('\n')
+                    .filter(|line| !line.is_empty())
+                    .map(str::to_owned),
+            );
+            index += 1;
+        }
+    }
+    commits
 }

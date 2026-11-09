@@ -70,6 +70,26 @@ pub struct Commit {
     pub date: String,
     pub decorations: String,
     pub parents: Vec<String>,
+    pub graph_prefix: String,
+    pub graph_before: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct CommitDetails {
+    pub oid: String,
+    pub message: String,
+    pub author: String,
+    pub author_email: String,
+    pub committer: String,
+    pub committer_email: String,
+    pub committed_at: String,
+    pub parents: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct CommitInspection {
+    pub details: CommitDetails,
+    pub files: Vec<FileEntry>,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
