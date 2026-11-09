@@ -15,6 +15,7 @@ use crate::{
 use anyhow::{Context, Result, bail};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::{
+    cell::RefCell,
     collections::{HashSet, VecDeque},
     env,
     ffi::OsString,
@@ -87,6 +88,21 @@ pub enum Modal {
     Message(String),
 }
 
+pub struct SearchEdit {
+    pub panel: Panel,
+    previous: String,
+    selection: usize,
+    scroll: usize,
+    working_tree: bool,
+}
+
+#[derive(Default)]
+struct CommitSearchCache {
+    commits: Arc<Vec<crate::model::Commit>>,
+    query: String,
+    matches: Vec<usize>,
+}
+
 pub struct App {
     pub repo: Repository,
     pub config: Config,
@@ -99,10 +115,18 @@ pub struct App {
     pub commit_rows: Vec<Row>,
     pub commit_files: Vec<FileEntry>,
     pub commit_oid: String,
-    pub selections: [usize; 10],
-    pub scrolls: [usize; 10],
-    pub searches: [String; 10],
-    pub page_sizes: [usize; 10],
+    pub head_tree_tab: bool,
+    pub head_files: Vec<FileEntry>,
+    pub head_rows: Vec<Row>,
+    pub head_oid: String,
+    pub head_loading: bool,
+    head_requested: Option<String>,
+    pub selections: [usize; 11],
+    pub scrolls: [usize; 11],
+    pub searches: [String; 11],
+    pub page_sizes: [usize; 11],
+    pub search_edit: Option<SearchEdit>,
+    commit_search_cache: RefCell<CommitSearchCache>,
     pub branch_rows_cache: [Vec<BranchRow>; 2],
     pub collapsed_branches: [HashSet<String>; 2],
     pub graph_working_tree: bool,
@@ -171,6 +195,7 @@ pub fn panel_index(panel: Panel) -> usize {
         Panel::CommitFiles => 7,
         Panel::RemoteBranches => 8,
         Panel::Details => 9,
+        Panel::HeadFiles => 10,
     }
 }
 
@@ -202,8 +227,14 @@ impl App {
             commit_rows: Vec::new(),
             commit_files: Vec::new(),
             commit_oid: String::new(),
-            selections: [0; 10],
-            scrolls: [0; 10],
+            head_tree_tab: false,
+            head_files: Vec::new(),
+            head_rows: Vec::new(),
+            head_oid: String::new(),
+            head_loading: false,
+            head_requested: None,
+            selections: [0; 11],
+            scrolls: [0; 11],
             graph_working_tree: true,
             commit_details: None,
             details_lines: vec!["Working tree / Index".into()],
@@ -211,7 +242,9 @@ impl App {
             inspection_loading: false,
             inspection_oid: None,
             searches: std::array::from_fn(|_| String::new()),
-            page_sizes: [15; 10],
+            page_sizes: [15; 11],
+            search_edit: None,
+            commit_search_cache: RefCell::default(),
             branch_rows_cache: std::array::from_fn(|_| Vec::new()),
             collapsed_branches: std::array::from_fn(|_| HashSet::new()),
             collapsed: HashSet::new(),
@@ -260,7 +293,9 @@ impl App {
         self.config.binding(group, action, defaults, key)
     }
     pub fn file_panel(&self) -> Panel {
-        if self.graph_working_tree {
+        if self.head_tree_tab {
+            Panel::HeadFiles
+        } else if self.graph_working_tree {
             Panel::Files
         } else {
             Panel::CommitFiles
@@ -309,6 +344,7 @@ impl App {
         let selected_oid = self.selected_commit().map(|commit| commit.oid.clone());
         let files_changed = self.snapshot.files != snapshot.files;
         self.snapshot = Arc::new(snapshot);
+        self.request_head_tree();
         if self.options.visible_refs.is_none() {
             self.options.visible_refs = Some(vec![
                 self.snapshot
@@ -345,6 +381,7 @@ impl App {
             Panel::Status,
             Panel::Files,
             Panel::CommitFiles,
+            Panel::HeadFiles,
             Panel::Branches,
             Panel::RemoteBranches,
             Panel::Commits,
@@ -364,6 +401,39 @@ impl App {
             self.search(Panel::CommitFiles),
             false,
         );
+    }
+    fn rebuild_head_rows(&mut self) {
+        self.head_rows = tree::rows(
+            &self.head_files,
+            self.config.gui.show_file_tree,
+            true,
+            &self.collapsed,
+            self.search(Panel::HeadFiles),
+            false,
+        );
+        self.selections[10] = self.selections[10].min(self.head_rows.len().saturating_sub(1));
+    }
+    fn request_head_tree(&mut self) {
+        if !self.head_tree_tab || self.head_requested.as_ref() == Some(&self.snapshot.head) {
+            return;
+        }
+        self.head_requested = Some(self.snapshot.head.clone());
+        self.head_oid = self.snapshot.head.clone();
+        self.head_files.clear();
+        self.head_rows.clear();
+        self.head_loading = !self.head_oid.is_empty();
+        if self.head_loading {
+            self.workers.head_tree.submit(self.head_oid.clone());
+        } else {
+            self.workers.head_tree.cancel();
+        }
+    }
+    pub fn toggle_file_tab(&mut self) {
+        self.head_tree_tab = !self.head_tree_tab;
+        self.request_head_tree();
+        self.set_focus(self.file_panel());
+        self.preview_key = None;
+        self.request_preview(false);
     }
     fn update_details(&mut self) {
         self.details_lines = if self.graph_working_tree {
@@ -439,10 +509,10 @@ impl App {
             }
             self.commit_details = None;
             self.inspection_loading = false;
-            if self.focus == Panel::CommitFiles {
+            if self.focus == Panel::CommitFiles && !self.head_tree_tab {
                 self.focus = Panel::Files;
             }
-            if self.focus != Panel::Stash {
+            if self.focus != Panel::Stash && !self.head_tree_tab {
                 self.side = Panel::Files;
             }
         } else if let Some(oid) = self.selected_commit().map(|commit| commit.oid.clone()) {
@@ -458,7 +528,7 @@ impl App {
                 self.scrolls[9] = 0;
                 self.workers.commit_files.submit(oid);
             }
-            if self.focus != Panel::Stash {
+            if self.focus != Panel::Stash && !self.head_tree_tab {
                 self.side = Panel::CommitFiles;
             }
         } else {
@@ -469,13 +539,34 @@ impl App {
             self.commit_details = None;
             self.inspection_oid = None;
         }
+        if self.head_tree_tab && self.focus != Panel::Stash {
+            self.side = Panel::HeadFiles;
+        }
         self.update_details();
+    }
+    /// The worktree belongs to HEAD, even when another visible branch is newer.
+    pub fn working_tree_graph_index(&self) -> usize {
+        self.filtered_commits()
+            .iter()
+            .position(|index| self.snapshot.commits[*index].oid == self.snapshot.head)
+            .unwrap_or(0)
+    }
+    pub fn commit_graph_row(&self, filtered_index: usize) -> usize {
+        filtered_index + usize::from(filtered_index >= self.working_tree_graph_index())
+    }
+    pub fn selected_graph_row(&self) -> usize {
+        if self.graph_working_tree {
+            self.working_tree_graph_index()
+        } else {
+            self.commit_graph_row(self.selected(Panel::Commits))
+        }
     }
     pub fn select_graph_row(&mut self, logical_index: usize) {
         self.focus = Panel::Commits;
-        self.graph_working_tree = logical_index == 0;
+        let worktree_index = self.working_tree_graph_index();
+        self.graph_working_tree = logical_index == worktree_index;
         self.selections[3] = logical_index
-            .saturating_sub(1)
+            .saturating_sub(usize::from(logical_index > worktree_index))
             .min(self.length(Panel::Commits).saturating_sub(1));
         self.sync_inspection();
         self.preview_key = None;
@@ -483,7 +574,9 @@ impl App {
         self.diff_scroll = 0;
         self.request_preview(false);
         self.dirty = true;
-        if logical_index > 0 && logical_index.saturating_add(50) >= self.length(Panel::Commits) {
+        if !self.graph_working_tree
+            && self.selected(Panel::Commits).saturating_add(50) >= self.length(Panel::Commits)
+        {
             self.load_more_history();
         }
     }
@@ -509,7 +602,9 @@ impl App {
         &self.searches[panel_index(panel)]
     }
     pub fn row(&self) -> Option<&Row> {
-        if self.side == Panel::CommitFiles {
+        if self.side == Panel::HeadFiles {
+            self.head_rows.get(self.selected(Panel::HeadFiles))
+        } else if self.side == Panel::CommitFiles {
             self.commit_rows.get(self.selected(Panel::CommitFiles))
         } else {
             self.rows.get(self.selected(Panel::Files))
@@ -645,18 +740,42 @@ impl App {
         if self.search(Panel::Commits).is_empty() {
             return (0..self.snapshot.commits.len()).collect();
         }
-        self.snapshot
-            .commits
-            .iter()
-            .enumerate()
-            .filter(|(_, commit)| {
-                fuzzy_match(
-                    &format!("{} {} {}", commit.short, commit.subject, commit.author),
-                    self.search(Panel::Commits),
-                )
-            })
-            .map(|(index, _)| index)
-            .collect()
+        let mut cache = self.commit_search_cache.borrow_mut();
+        let query = self.search(Panel::Commits);
+        if cache.query != query || !Arc::ptr_eq(&cache.commits, &self.snapshot.commits) {
+            let compiled = crate::fuzzy::Query::new(query);
+            let mut matches: Vec<_> = self
+                .snapshot
+                .commits
+                .iter()
+                .enumerate()
+                .filter_map(|(index, commit)| {
+                    compiled
+                        .score(&format!(
+                            "{} {} {} {} {}",
+                            commit.oid,
+                            commit.subject,
+                            commit.author,
+                            commit.committer,
+                            commit.decorations
+                        ))
+                        .map(|score| {
+                            (
+                                index,
+                                score
+                                    + compiled
+                                        .score(&commit.subject)
+                                        .map_or(0, |subject| 128 + subject.max(0)),
+                            )
+                        })
+                })
+                .collect();
+            matches.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            cache.matches = matches.into_iter().map(|(index, _)| index).collect();
+            cache.commits = self.snapshot.commits.clone();
+            cache.query = query.to_owned();
+        }
+        cache.matches.clone()
     }
     pub fn filtered_stashes(&self) -> Vec<usize> {
         self.snapshot
@@ -695,6 +814,7 @@ impl App {
         match panel {
             Panel::Files => self.rows.len(),
             Panel::CommitFiles => self.commit_rows.len(),
+            Panel::HeadFiles => self.head_rows.len(),
             Panel::Branches if self.branch_tab == 3 => self.snapshot.worktrees.len(),
             Panel::Branches => self.branch_rows(false).len(),
             Panel::RemoteBranches => self.branch_rows(true).len(),
@@ -726,6 +846,7 @@ impl App {
             }
         }
         self.rebuild_commit_rows();
+        self.rebuild_head_rows();
         self.clamp_selections();
         self.dirty = true;
     }
@@ -780,6 +901,16 @@ impl App {
 
     fn target(&self) -> Option<PreviewTarget> {
         match self.side {
+            Panel::HeadFiles => {
+                let row = self.row()?;
+                if row.directory || self.head_oid.is_empty() {
+                    return None;
+                }
+                Some(PreviewTarget::TreeFile {
+                    path: row.path.clone(),
+                    oid: self.head_oid.clone(),
+                })
+            }
             Panel::Files | Panel::CommitFiles => {
                 let row = self.row()?;
                 let files = if self.side == Panel::CommitFiles {
@@ -825,7 +956,10 @@ impl App {
         };
         if !explicit
             && !self.state.diff_preview_enabled
-            && matches!(self.side, Panel::Files | Panel::CommitFiles)
+            && matches!(
+                self.side,
+                Panel::Files | Panel::CommitFiles | Panel::HeadFiles
+            )
         {
             self.workers.preview.cancel();
             self.preview_loading = false;
@@ -870,8 +1004,15 @@ impl App {
                     if id == self.workers.refresh.current() =>
                 {
                     let snapshot = Arc::make_mut(&mut self.snapshot);
+                    let current = references.iter().find(|reference| reference.current);
+                    snapshot.ahead = current.and_then(|reference| reference.ahead);
+                    snapshot.behind = current.and_then(|reference| reference.behind);
+                    snapshot.upstream = current
+                        .map(|reference| reference.upstream.clone())
+                        .unwrap_or_default();
                     snapshot.references = references;
                     snapshot.head = head;
+                    self.request_head_tree();
                     self.rebuild_branch_rows();
                     self.request_history();
                 }
@@ -962,6 +1103,36 @@ impl App {
                         }
                     }
                 }
+                WorkerEvent::HeadTree(id, oid, result)
+                    if id == self.workers.head_tree.current()
+                        && self.head_requested.as_ref() == Some(&oid) =>
+                {
+                    self.head_loading = false;
+                    match result {
+                        Ok(files) => {
+                            let selected = self
+                                .head_rows
+                                .get(self.selections[10])
+                                .map(|row| row.path.clone());
+                            self.head_files = files;
+                            self.head_oid = oid;
+                            self.rebuild_head_rows();
+                            if let Some(index) = selected.and_then(|path| {
+                                self.head_rows.iter().position(|row| row.path == path)
+                            }) {
+                                self.selections[10] = index;
+                            }
+                            if self.side == Panel::HeadFiles {
+                                self.preview_key = None;
+                                self.request_preview(self.focus == Panel::Diff);
+                            }
+                        }
+                        Err(error) => {
+                            self.head_requested = None;
+                            self.error(error);
+                        }
+                    }
+                }
                 WorkerEvent::CommandDone(result) => {
                     while let Ok(chunk) = self.workers.output.try_recv() {
                         self.append_output(&String::from_utf8_lossy(&chunk));
@@ -1047,8 +1218,17 @@ impl App {
         }
     }
     pub fn set_focus(&mut self, panel: Panel) {
+        if self
+            .search_edit
+            .as_ref()
+            .is_some_and(|edit| edit.panel != panel)
+        {
+            self.search_edit = None;
+        }
         self.focus = panel;
-        if matches!(panel, Panel::Files | Panel::CommitFiles) {
+        if matches!(panel, Panel::Files | Panel::CommitFiles | Panel::HeadFiles) {
+            self.head_tree_tab = panel == Panel::HeadFiles;
+            self.request_head_tree();
             self.side = panel;
             self.diff_line = 0;
             self.diff_scroll = 0;
@@ -1073,11 +1253,7 @@ impl App {
     }
     fn move_selection(&mut self, delta: isize) {
         if self.focus == Panel::Commits {
-            let old = if self.graph_working_tree {
-                0
-            } else {
-                self.selected(Panel::Commits) + 1
-            };
+            let old = self.selected_graph_row();
             let next = old
                 .saturating_add_signed(delta)
                 .min(self.length(Panel::Commits));
@@ -1122,6 +1298,141 @@ impl App {
         self.page_sizes[panel_index(self.focus)]
             .saturating_sub(1)
             .max(1)
+    }
+
+    fn start_live_search(&mut self) {
+        self.search_edit = Some(SearchEdit {
+            panel: self.focus,
+            previous: self.search(self.focus).to_owned(),
+            selection: self.selected(self.focus),
+            scroll: self.scrolls[panel_index(self.focus)],
+            working_tree: self.graph_working_tree,
+        });
+        self.dirty = true;
+    }
+
+    fn apply_live_search(&mut self, query: String) {
+        let index = panel_index(self.focus);
+        if self.searches[index] == query {
+            return;
+        }
+        self.searches[index] = query;
+        self.selections[index] = 0;
+        self.scrolls[index] = 0;
+        match self.focus {
+            Panel::Commits => {
+                self.graph_working_tree = self.filtered_commits().is_empty();
+                self.sync_inspection();
+            }
+            Panel::Files => self.rebuild(),
+            Panel::CommitFiles => self.rebuild_commit_rows(),
+            Panel::HeadFiles => self.rebuild_head_rows(),
+            _ => {}
+        }
+        self.diff_line = 0;
+        self.diff_scroll = 0;
+        self.preview_key = None;
+        self.request_preview(false);
+        self.dirty = true;
+    }
+
+    fn search_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Enter => {
+                self.search_edit = None;
+            }
+            KeyCode::Esc | KeyCode::Char('c')
+                if key.code == KeyCode::Esc || key.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                let edit = self.search_edit.take().unwrap();
+                self.apply_live_search(edit.previous);
+                self.selections[panel_index(edit.panel)] = edit.selection;
+                self.scrolls[panel_index(edit.panel)] = edit.scroll;
+                self.graph_working_tree = edit.working_tree;
+                self.clamp_selections();
+                if edit.panel == Panel::Commits {
+                    self.sync_inspection();
+                }
+                self.preview_key = None;
+                self.request_preview(false);
+            }
+            KeyCode::Down | KeyCode::Up | KeyCode::PageDown | KeyCode::PageUp => {
+                let delta = match key.code {
+                    KeyCode::Down => 1,
+                    KeyCode::Up => -1,
+                    KeyCode::PageDown => self.page_step() as isize,
+                    _ => -(self.page_step() as isize),
+                };
+                self.move_selection(delta);
+            }
+            KeyCode::Char('n' | 'p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.move_selection(if key.code == KeyCode::Char('n') {
+                    1
+                } else {
+                    -1
+                });
+            }
+            _ => {
+                let mut query = self.search(self.focus).to_owned();
+                match key.code {
+                    KeyCode::Backspace => {
+                        if key
+                            .modifiers
+                            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                        {
+                            while query.ends_with(char::is_whitespace) {
+                                query.pop();
+                            }
+                            while !query.is_empty() && !query.ends_with(char::is_whitespace) {
+                                query.pop();
+                            }
+                        } else {
+                            query.pop();
+                        }
+                    }
+                    KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        query.clear()
+                    }
+                    KeyCode::Char(character)
+                        if !key
+                            .modifiers
+                            .intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER) =>
+                    {
+                        query.push(character)
+                    }
+                    _ => return,
+                }
+                self.apply_live_search(query);
+            }
+        }
+        self.dirty = true;
+    }
+
+    pub fn search_hint(&self, panel: Panel) -> Option<String> {
+        let editing = self
+            .search_edit
+            .as_ref()
+            .is_some_and(|edit| edit.panel == panel);
+        let query = self.search(panel);
+        if !editing && query.is_empty() {
+            return None;
+        }
+        let count = match panel {
+            Panel::Commits => self.filtered_commits().len(),
+            Panel::Files => self.rows.iter().filter(|row| !row.directory).count(),
+            Panel::CommitFiles => self.commit_rows.iter().filter(|row| !row.directory).count(),
+            Panel::HeadFiles => self.head_rows.iter().filter(|row| !row.directory).count(),
+            _ => return None,
+        };
+        Some(format!(
+            " /{query}{} · {count} matches{} ",
+            if editing { "▏" } else { "" },
+            if panel == Panel::Commits {
+                " (loaded)"
+            } else {
+                ""
+            }
+        ))
     }
 
     fn scroll_diff(&mut self, delta: isize) {
@@ -1498,7 +1809,11 @@ impl App {
     }
 
     pub fn paste(&mut self, text: String) {
-        if let Some(Modal::Input { text: input, .. }) = &mut self.modal {
+        if self.search_edit.is_some() {
+            let mut query = self.search(self.focus).to_owned();
+            query.push_str(&text.replace(['\r', '\n'], " "));
+            self.apply_live_search(query);
+        } else if let Some(Modal::Input { text: input, .. }) = &mut self.modal {
             input.push_str(&text.replace(['\r', '\n'], " "));
             self.dirty = true;
         }
@@ -1514,6 +1829,10 @@ impl App {
     fn key(&mut self, key: KeyEvent) -> Result<()> {
         if self.modal.is_some() {
             return self.handle_modal(key);
+        }
+        if self.search_edit.is_some() {
+            self.search_key(key);
+            return Ok(());
         }
         if key_matches("<ctrl+c>", key) {
             if let Some((cancel, _, _)) = &self.busy {
@@ -1540,7 +1859,9 @@ impl App {
             if self.focus == Panel::Diff {
                 self.fullscreen = false;
                 self.set_focus(self.side);
-            } else if self.focus == Panel::CommitFiles {
+            } else if matches!(self.focus, Panel::CommitFiles | Panel::HeadFiles)
+                && self.search(self.focus).is_empty()
+            {
                 self.set_focus(Panel::Commits);
             } else if !self.search(self.focus).is_empty() {
                 let selected_oid = self.selected_commit().map(|commit| commit.oid.clone());
@@ -1625,8 +1946,20 @@ impl App {
             self.modal = Some(Modal::Help { scroll: 0 });
             return Ok(());
         }
-        if self.is("universal", "startSearch", &["/"], key) {
-            self.prompt_for(Prompt::Search);
+        if self.is("universal", "startSearch", &["/"], key)
+            || (matches!(
+                self.focus,
+                Panel::Commits | Panel::Files | Panel::CommitFiles | Panel::HeadFiles
+            ) && self.is("universal", "fuzzySearch", &["<ctrl+f>"], key))
+        {
+            if matches!(
+                self.focus,
+                Panel::Commits | Panel::Files | Panel::CommitFiles | Panel::HeadFiles
+            ) {
+                self.start_live_search();
+            } else {
+                self.prompt_for(Prompt::Search);
+            }
             return Ok(());
         }
         if matches!(self.focus, Panel::Diff | Panel::Output) && !self.search(self.focus).is_empty()
@@ -1743,8 +2076,10 @@ impl App {
             if self.focus == Panel::Diff && key.code != KeyCode::Tab {
                 self.next_hunk(1);
             } else if key.code != KeyCode::Tab && self.navigate_branch_group(true) {
-            } else if matches!(self.focus, Panel::Files | Panel::CommitFiles)
-                && key.code != KeyCode::Tab
+            } else if matches!(
+                self.focus,
+                Panel::Files | Panel::CommitFiles | Panel::HeadFiles
+            ) && key.code != KeyCode::Tab
                 && self.row().is_some_and(|row| row.directory)
             {
                 let path = self.row().unwrap().path.clone();
@@ -1762,8 +2097,10 @@ impl App {
             if self.focus == Panel::Diff && key.code != KeyCode::BackTab {
                 self.next_hunk(-1);
             } else if key.code != KeyCode::BackTab && self.navigate_branch_group(false) {
-            } else if matches!(self.focus, Panel::Files | Panel::CommitFiles)
-                && key.code != KeyCode::BackTab
+            } else if matches!(
+                self.focus,
+                Panel::Files | Panel::CommitFiles | Panel::HeadFiles
+            ) && key.code != KeyCode::BackTab
                 && self.row().is_some_and(|row| row.directory)
             {
                 let path = self.row().unwrap().path.clone();
@@ -1796,17 +2133,23 @@ impl App {
                     self.refresh();
                 }
                 Panel::Diff => {
-                    self.show_staged = !self.show_staged;
-                    self.preview_key = None;
-                    self.request_preview(true);
+                    if self.side != Panel::HeadFiles {
+                        self.show_staged = !self.show_staged;
+                        self.preview_key = None;
+                        self.request_preview(true);
+                    }
                 }
+                Panel::Files | Panel::CommitFiles | Panel::HeadFiles => self.toggle_file_tab(),
                 _ => {}
             }
             self.request_preview(self.focus == Panel::Diff);
             return Ok(());
         }
         if self.is("universal", "viewFileHistory", &["F"], key)
-            && matches!(self.focus, Panel::Files | Panel::CommitFiles | Panel::Diff)
+            && matches!(
+                self.focus,
+                Panel::Files | Panel::CommitFiles | Panel::HeadFiles | Panel::Diff
+            )
         {
             if let Some(row) = self.row().cloned() {
                 self.options.history_path = Some(row.path);
@@ -1863,13 +2206,18 @@ impl App {
         match self.focus {
             Panel::Files => self.files_key(key)?,
             Panel::CommitFiles => self.commit_files_key(key)?,
+            Panel::HeadFiles => self.head_files_key(key)?,
             Panel::Diff => self.diff_key(key)?,
             Panel::Branches | Panel::RemoteBranches => self.branches_key(key)?,
             Panel::Commits if self.graph_working_tree => {
                 if key.code == KeyCode::Enter {
-                    self.set_focus(Panel::Files);
+                    self.set_focus(self.file_panel());
                 } else {
-                    self.files_key(key)?;
+                    let side = self.side;
+                    self.side = Panel::Files;
+                    let result = self.files_key(key);
+                    self.side = side;
+                    result?;
                 }
             }
             Panel::Commits => self.commits_key(key)?,
@@ -2113,6 +2461,30 @@ impl App {
         Ok(())
     }
 
+    fn head_files_key(&mut self, key: KeyEvent) -> Result<()> {
+        if key_matches("<enter>", key) {
+            self.open_row();
+        } else if self.is("files", "toggleTreeView", &["`"], key) {
+            self.config.gui.show_file_tree = !self.config.gui.show_file_tree;
+            self.rebuild();
+        } else if self.is("files", "collapseAll", &["-"], key) {
+            for row in &self.head_rows {
+                if row.directory {
+                    self.collapsed.insert(row.path.clone());
+                }
+            }
+            self.rebuild_head_rows();
+        } else if self.is("files", "expandAll", &["="], key) {
+            self.collapsed.clear();
+            self.rebuild_head_rows();
+        } else if self.is("files", "copyFileInfoToClipboard", &["y"], key) {
+            if let Some(row) = self.row() {
+                self.copy(row.path.to_string_lossy().into_owned());
+            }
+        }
+        Ok(())
+    }
+
     fn open_row(&mut self) {
         if let Some(row) = self.row() {
             if row.directory {
@@ -2338,7 +2710,7 @@ impl App {
             return Ok(());
         };
         if key_matches("<enter>", key) {
-            self.set_focus(Panel::CommitFiles);
+            self.set_focus(self.file_panel());
         } else if self.is("commits", "checkoutCommit", &["<space>"], key) {
             self.confirm(Operation::git(["switch", "--detach", &commit.oid]));
         } else if self.is("commits", "viewResetOptions", &["g"], key) {
@@ -2604,6 +2976,9 @@ impl App {
     }
 
     fn external_tool(&mut self, merge: bool) -> Result<()> {
+        if self.side == Panel::HeadFiles {
+            return Ok(());
+        }
         let row = self.row().context("Select a file first")?;
         let mut args: Vec<OsString> = vec![
             if merge { "mergetool" } else { "difftool" }.into(),
@@ -2623,6 +2998,9 @@ impl App {
     }
 
     fn edit_file(&mut self) -> Result<()> {
+        if self.side == Panel::HeadFiles {
+            return Ok(());
+        }
         let row = self.row().context("Select a file first")?;
         let path = self.repo.root.join(&row.path);
         if !self.config.os.edit.is_empty() {
@@ -2658,6 +3036,9 @@ impl App {
         Ok(())
     }
     fn open_file(&mut self) -> Result<()> {
+        if self.side == Panel::HeadFiles {
+            return Ok(());
+        }
         let row = self.row().context("Select a file first")?;
         let path = self.repo.root.join(&row.path);
         if path.join(".git").exists() {

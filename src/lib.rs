@@ -2,6 +2,7 @@ pub mod actions;
 pub mod app;
 pub mod branches;
 pub mod config;
+pub mod fuzzy;
 pub mod git;
 pub mod model;
 pub mod patch;

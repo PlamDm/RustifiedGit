@@ -49,6 +49,8 @@ pub struct Reference {
     pub full_name: String,
     pub oid: String,
     pub upstream: String,
+    pub ahead: Option<usize>,
+    pub behind: Option<usize>,
     pub current: bool,
     pub kind: RefKind,
 }
@@ -119,12 +121,18 @@ pub struct Snapshot {
     pub branch: String,
     pub head: String,
     pub upstream: String,
+    pub ahead: Option<usize>,
+    pub behind: Option<usize>,
     pub operation: String,
     pub elapsed_ms: u128,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PreviewTarget {
+    TreeFile {
+        path: PathBuf,
+        oid: String,
+    },
     File {
         path: PathBuf,
         old_path: Option<PathBuf>,
@@ -159,6 +167,7 @@ pub enum Panel {
     Output,
     Diff,
     CommitFiles,
+    HeadFiles,
     RemoteBranches,
     Details,
 }
@@ -176,12 +185,13 @@ impl Panel {
             Self::Output => "Command output",
             Self::Diff => "Diff",
             Self::CommitFiles => "Committed files",
+            Self::HeadFiles => "HEAD tree",
         }
     }
     pub fn number(self) -> usize {
         match self {
             Self::Status => 1,
-            Self::Files | Self::CommitFiles => 7,
+            Self::Files | Self::CommitFiles | Self::HeadFiles => 7,
             Self::Branches => 2,
             Self::RemoteBranches => 3,
             Self::Commits => 5,
@@ -201,6 +211,7 @@ impl Panel {
             Self::Output => "commandOutput",
             Self::Diff => "main",
             Self::CommitFiles => "commitFiles",
+            Self::HeadFiles => "headFiles",
             Self::RemoteBranches => "remoteBranches",
             Self::Details => "commitDetails",
         }

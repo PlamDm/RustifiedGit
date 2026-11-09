@@ -1,4 +1,4 @@
-use crate::model::FileEntry;
+use crate::{fuzzy::Query, model::FileEntry};
 use std::{
     collections::{BTreeMap, HashSet},
     path::{Path, PathBuf},
@@ -26,12 +26,7 @@ struct Node {
 }
 
 pub fn fuzzy_match(text: &str, needle: &str) -> bool {
-    let text = text.to_lowercase();
-    let needle = needle.to_lowercase();
-    let mut chars = text.chars();
-    needle
-        .chars()
-        .all(|wanted| chars.by_ref().any(|actual| actual == wanted))
+    Query::new(needle).is_match(text)
 }
 
 pub fn rows(
@@ -42,10 +37,11 @@ pub fn rows(
     search: &str,
     changed_only: bool,
 ) -> Vec<Row> {
+    let query = Query::new(search);
     let visible = |file: &FileEntry| {
         (show_unchanged || file.changed() || file.ignored())
             && (!changed_only || file.changed() || file.ignored())
-            && fuzzy_match(&file.path.to_string_lossy(), search)
+            && query.is_match(&file.path.to_string_lossy())
     };
     if !tree {
         return files

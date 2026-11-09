@@ -85,16 +85,39 @@ and returns to the same file. Pane 6 scrolls wrapped messages and metadata.
 In a diff, Up/Down or `j`/`k` scroll through a selected hunk immediately;
 PageUp/PageDown scroll by a screen. Left/Right jump between hunks. Press `a`
 to switch to individual-line selection when you want to stage specific lines.
-The graph's first row, **Working tree / Index**, shows uncommitted changes in
-the same inspector. Pane 7 initially shows changed files; `Ctrl+s` can turn off
-the changed-only filter to browse the full repository tree.
+**Working tree / Index** appears directly above the active branch's tip, even
+when another enabled branch has newer commits. The active branch is bold in
+the branch list and graph. If HEAD is outside the loaded or filtered history,
+the working-tree row stays at the top so its actions remain available.
+
+Pane 7 has **Changes** and **HEAD tree** tabs; `[` / `]` switches between them.
+Changes follows the hovered commit, or shows uncommitted changes when the
+working-tree row is selected. HEAD tree shows every tracked path committed at
+current HEAD, independent of the hovered commit and dirty working files. Enter
+opens that file's committed contents full screen. Each tab keeps its own search
+and selection. `Ctrl+s` can still adjust working-file visibility.
+
+The header shows **AHEAD n · BEHIND n** relative to the active branch's configured
+upstream; branch rows show compact `↑n ↓n` counts. Counts use the locally known
+remote refs and update on refresh/fetch. Missing or unset upstreams are labeled
+instead of being reported as zero.
+
+Press `/` or `Ctrl+f` in the graph or either file tab for live **fzf-style search**.
+Type to filter, use arrows or Ctrl+n/p to select, Enter to keep the filter,
+and Esc to cancel and restore the previous selection. Esc after accepting
+clears the filter. Commit matches are ranked, prioritizing subjects; file
+matches retain their directory hierarchy and reveal collapsed descendants.
+Terms separated by spaces must all match; `'term` requires a literal substring,
+`!term` excludes one, and `^` / `$` anchor terms. Lowercase queries ignore case;
+uppercase queries use smart case. This is built in and needs no fzf executable.
 
 Local branches also provide tags and worktrees through `[`/`]`. Graph history
 loads the first 1,000 commits independently of file status, then automatically
 loads another 1,000 when you approach the end. `.` explicitly loads another page.
 The count's `+` means older commits remain. History is reused while refs and
-filters stay unchanged. A search filters loaded commits and hides edges between
-omitted rows. Reflog remains available through `[`/`]` in the graph.
+filters stay unchanged. A search covers loaded commits (subject, hash, author, committer and ref labels),
+then ranks matches and hides edges between omitted rows. It does not scan the
+full repository history or file contents. Reflog remains available through `[`/`]` in the graph.
 
 For a large fresh clone, press `G` in the graph to build Git's commit-graph
 acceleration cache. The first build can take several seconds; subsequent

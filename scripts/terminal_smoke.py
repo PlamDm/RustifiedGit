@@ -29,6 +29,7 @@ def fixture(root, files=3):
         path.parent.mkdir(exist_ok=True)
         path.write_text(f"line {index}\n")
     (root / "work.txt").write_text("base\n")
+    (root / "VVVVVVVVVVVV.txt").write_text("KKKKKKKKKKKK\n")
     git(root, "add", "--all")
     # Repeated Zs stay contiguous in Ratatui's incremental terminal updates.
     git(root, "commit", "-q", "-m", "fixture", "-m", "ZZZZZZZZZZZZ\n\nCommit inspection body.")
@@ -139,12 +140,17 @@ def main():
         git(root, "branch", "feature/user/login")
         git(root, "branch", "feature/user/profile")
         git(root, "update-ref", "refs/remotes/origin/feature/user/login", "HEAD")
+        git(root, "config", "remote.origin.url", ".")
+        git(root, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
+        git(root, "update-ref", "refs/remotes/origin/main", "HEAD")
+        git(root, "branch", "--set-upstream-to=origin/main", "main")
         (config / "config.yml").write_text("git:\n  autoFetch: false\n  autoRefresh: false\n")
         (root / "work.txt").write_text("updated\n" + "".join(f"large-hunk-line-{line:04}\n" for line in range(240)) + "QQQQQQQQQQQQ\n")
         session = Session(args.binary.resolve(), root, config)
         finished = False
         try:
             session.until("work.txt")
+            session.until("AHEAD")
             ready_ms = round((time.monotonic() - session.started) * 1000, 2)
             original_head = git(root, "rev-parse", "HEAD")
             session.send("2/feature\r ")
@@ -163,6 +169,14 @@ def main():
             session.send("\x1b")
             session.read(0.1)
             session.send("5\x1b[H7/work.txt\r")
+            session.read(0.1)
+            session.send("]")
+            session.until("VVVVVVVVVVVV")
+            session.send("/VVVV\r\r")
+            session.until("KKKKKKKKKKKK")
+            session.send("\x1b")
+            session.read(0.1)
+            session.send("[")
             session.read(0.1)
             session.send("\r")
             session.read(0.1)
@@ -189,7 +203,7 @@ def main():
             session.read(0.15)
             session.finish()
             finished = True
-            print(json.dumps({"terminal_smoke": "passed", "ready_ms": ready_ms, "verified": ["nested branch group graph toggle without checkout", "persisted branch visibility", "automatic full commit inspection", "modified arrow navigation", "executable context menu", "working-tree navigation", "full-screen large hunk keyboard scrolling", "staging", "commit", "persisted preview toggle", "live output", "process cancellation", "clean terminal restoration"]}))
+            print(json.dumps({"terminal_smoke": "passed", "ready_ms": ready_ms, "verified": ["nested branch group graph toggle without checkout", "persisted branch visibility", "automatic full commit inspection", "modified arrow navigation", "executable context menu", "working-tree navigation", "ahead/behind header", "HEAD tree tab and committed contents", "live fuzzy file search", "independent file-tab filters", "full-screen large hunk keyboard scrolling", "staging", "commit", "persisted preview toggle", "live output", "process cancellation", "clean terminal restoration"]}))
         except Exception:
             session.read(0.1)
             import re

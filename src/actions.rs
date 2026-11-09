@@ -619,6 +619,79 @@ pub fn for_app(app: &App) -> Vec<Action> {
             }
         }
         Panel::Files | Panel::CommitFiles => catalog.files(),
+        Panel::HeadFiles => {
+            if app.row().is_some() {
+                catalog.key(
+                    "<enter>",
+                    "Inspect HEAD file",
+                    "Open committed HEAD contents full screen, or expand the selected directory.",
+                );
+                catalog.add(
+                    "universal",
+                    "viewFileHistory",
+                    "F",
+                    "History of this path",
+                    "Show commits touching this HEAD path; follow file renames.",
+                );
+                catalog.add(
+                    "files",
+                    "copyFileInfoToClipboard",
+                    "y",
+                    "Copy path",
+                    "Copy the selected repository-relative path.",
+                );
+            }
+            catalog.add(
+                "files",
+                "toggleTreeView",
+                "`",
+                "Tree / flat view",
+                "Switch HEAD files between a directory tree and flat paths.",
+            );
+            catalog.add(
+                "files",
+                "collapseAll",
+                "-",
+                "Collapse directories",
+                "Collapse all visible HEAD directories.",
+            );
+            catalog.add(
+                "files",
+                "expandAll",
+                "=",
+                "Expand directories",
+                "Expand all HEAD directories.",
+            );
+        }
+        Panel::Diff if app.side == Panel::HeadFiles => {
+            catalog.key(
+                "n",
+                "Next HEAD file",
+                "Inspect the next path in the HEAD file tree.",
+            );
+            catalog.key(
+                "N",
+                "Previous HEAD file",
+                "Inspect the previous path in the HEAD file tree.",
+            );
+            catalog.key(
+                "H",
+                "Scroll left",
+                "Reveal earlier columns in the committed file.",
+            );
+            catalog.key(
+                "L",
+                "Scroll right",
+                "Reveal later columns in the committed file.",
+            );
+            catalog.add(
+                "universal",
+                "viewFileHistory",
+                "F",
+                "History of this path",
+                "Show commits touching this HEAD path.",
+            );
+        }
         Panel::Diff => {
             catalog.key(
                 "a",
@@ -808,8 +881,20 @@ pub fn for_app(app: &App) -> Vec<Action> {
             "universal",
             "startSearch",
             "/",
-            "Search",
-            "Filter the current list or find text in the loaded diff/output.",
+            if matches!(app.focus, Panel::Commits | Panel::Files | Panel::CommitFiles | Panel::HeadFiles) { "Fuzzy search" } else { "Search" },
+            "Filter as you type; space combines terms, 'term matches literally, !term excludes. Commit search covers loaded history.",
+        );
+    }
+    if matches!(
+        app.focus,
+        Panel::Commits | Panel::Files | Panel::CommitFiles | Panel::HeadFiles
+    ) {
+        catalog.add(
+            "universal",
+            "fuzzySearch",
+            "<ctrl+f>",
+            "Fuzzy search",
+            "Search this list interactively; arrows select, Enter keeps the filter, Esc cancels.",
         );
     }
     if matches!(app.focus, Panel::Diff | Panel::Output) && !app.search(app.focus).is_empty() {
@@ -835,13 +920,22 @@ pub fn for_app(app: &App) -> Vec<Action> {
         "Filters…",
         "Set a history path filter or adjust working-file visibility.",
     );
-    if matches!(app.focus, Panel::Branches | Panel::Commits | Panel::Diff) {
+    if matches!(
+        app.focus,
+        Panel::Branches
+            | Panel::Commits
+            | Panel::Diff
+            | Panel::Files
+            | Panel::CommitFiles
+            | Panel::HeadFiles
+    ) && !(app.focus == Panel::Diff && app.side == Panel::HeadFiles)
+    {
         catalog.add(
             "universal",
             "nextTab",
             "]",
             "Next tab / diff side",
-            "Switch branch/history tabs, or toggle staged and unstaged differences.",
+            "Switch tabs: file changes / HEAD tree, branch/history tabs, or staged / unstaged diffs.",
         );
         catalog.add(
             "universal",

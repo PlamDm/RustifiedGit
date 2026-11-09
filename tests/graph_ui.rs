@@ -175,7 +175,7 @@ fn numbered_panes_and_tab_order_cover_the_layout() {
         "4 Stashes",
         "5 Commit graph",
         "6 Commit details",
-        "7 Changed files",
+        "7 [Changes] | HEAD tree",
         "0 Diff",
     ] {
         assert!(text.contains(title), "Missing {title}:\n{text}");

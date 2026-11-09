@@ -22,6 +22,7 @@ const READ_TIMEOUT: Duration = Duration::from_secs(60);
 pub const HISTORY_PAGE_SIZE: usize = 1000;
 type IndexStamp = (Option<SystemTime>, u64);
 type TrackedCache = Arc<Mutex<Option<(IndexStamp, Vec<PathBuf>)>>>;
+type TreeCache = Arc<Mutex<Option<(String, Vec<FileEntry>)>>>;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ReadOptions {
@@ -40,6 +41,7 @@ pub struct Repository {
     pub root: PathBuf,
     pub git_dir: PathBuf,
     tracked: TrackedCache,
+    tree: TreeCache,
 }
 
 #[derive(Clone, Debug)]
@@ -117,6 +119,7 @@ impl Repository {
             root,
             git_dir,
             tracked: Arc::new(Mutex::new(None)),
+            tree: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -160,6 +163,110 @@ impl Repository {
         paths.dedup();
         *self.tracked.lock().unwrap() = Some((stamp, paths.clone()));
         Ok(paths)
+    }
+
+    /// The committed tree is independent of the index and working directory.
+    /// Cache one immutable tree so switching tabs never repeats a large listing.
+    pub fn tree_files(&self, oid: &str, cancel: &Cancellation) -> Result<Vec<FileEntry>> {
+        cancel.check()?;
+        if oid.is_empty() {
+            return Ok(Vec::new());
+        }
+        if let Some((cached_oid, files)) = self.tree.lock().unwrap().as_ref() {
+            if cached_oid == oid {
+                return Ok(files.clone());
+            }
+        }
+        if !matches!(oid.len(), 40 | 64) || !oid.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            bail!("Expected an immutable commit object ID for the HEAD tree");
+        }
+        let output = self.read(["ls-tree", "-r", "--name-only", "-z", oid, "--"], cancel)?;
+        let files = output
+            .stdout
+            .split(|byte| *byte == 0)
+            .filter(|path| !path.is_empty())
+            .map(|path| FileEntry::clean(PathBuf::from(os_path(path))))
+            .collect::<Vec<_>>();
+        cancel.check()?;
+        *self.tree.lock().unwrap() = Some((oid.to_owned(), files.clone()));
+        Ok(files)
+    }
+
+    fn tree_file_preview(
+        &self,
+        path: &Path,
+        oid: &str,
+        explicit: bool,
+        settings: &GuiConfig,
+        cancel: &Cancellation,
+    ) -> Result<Preview> {
+        if !matches!(oid.len(), 40 | 64) || !oid.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            bail!("Expected an immutable commit object ID for the HEAD file");
+        }
+        let title = format!("HEAD: {}", path.to_string_lossy());
+        let mut object = OsString::from(format!("{oid}:"));
+        object.push(path);
+        if !explicit && settings.diff_preview_max_file_bytes > 0 {
+            let size = self.read(
+                [OsString::from("cat-file"), "-s".into(), object.clone()],
+                cancel,
+            )?;
+            let size = size
+                .text()
+                .trim()
+                .parse::<usize>()
+                .context("Invalid blob size")?;
+            if size > settings.diff_preview_max_file_bytes {
+                return Ok(Preview {
+                    title,
+                    text: format!(
+                        "Automatic preview skipped: file exceeds {} bytes.\nPress 0 or Enter to open its committed contents.",
+                        settings.diff_preview_max_file_bytes
+                    ),
+                    suppressed: true,
+                    ..Preview::default()
+                });
+            }
+        }
+        let limit = if !explicit && settings.diff_preview_max_bytes > 0 {
+            settings.diff_preview_max_bytes
+        } else {
+            READ_LIMIT
+        };
+        let output = process::run(
+            &self.root,
+            &CommandSpec::git([OsString::from("cat-file"), "-p".into(), object]),
+            cancel,
+            limit,
+            None,
+            READ_TIMEOUT,
+        )?
+        .success()?;
+        if output.truncated {
+            return Ok(Preview {
+                title,
+                text: if explicit {
+                    "Committed file exceeds the 64 MiB viewer limit.".into()
+                } else {
+                    format!(
+                        "Automatic preview skipped: output exceeds {limit} bytes.\nPress 0 or Enter to open its committed contents."
+                    )
+                },
+                suppressed: true,
+                ..Preview::default()
+            });
+        }
+        Ok(Preview {
+            title,
+            text: if output.stdout.contains(&0) {
+                "Binary file in HEAD.".into()
+            } else {
+                String::from_utf8_lossy(&output.stdout).into_owned()
+            },
+            // Contents may themselves contain patch syntax; never expose them as a patch.
+            patch: Vec::new(),
+            ..Preview::default()
+        })
     }
 
     pub fn files(&self, ignored: bool, cancel: &Cancellation) -> Result<(Vec<FileEntry>, String)> {
@@ -232,7 +339,7 @@ impl Repository {
             [
                 "for-each-ref",
                 "--sort=-committerdate",
-                "--format=%(refname)%00%(objectname)%00%(upstream:short)%00%(HEAD)%00",
+                "--format=%(refname)%00%(objectname)%00%(upstream:short)%00%(HEAD)%00%(upstream:track)%00",
                 "refs/heads",
                 "refs/remotes",
                 "refs/tags",
@@ -241,7 +348,7 @@ impl Repository {
         )?;
         let fields: Vec<_> = output.stdout.split(|byte| *byte == 0).collect();
         let mut refs = Vec::new();
-        for fields in fields.chunks_exact(4) {
+        for fields in fields.chunks_exact(5) {
             let full_name = String::from_utf8_lossy(fields[0])
                 .trim_start_matches('\n')
                 .to_owned();
@@ -254,12 +361,29 @@ impl Repository {
             } else {
                 continue;
             };
+            let upstream = String::from_utf8_lossy(fields[2]).into_owned();
+            let tracking = String::from_utf8_lossy(fields[4]);
+            let counts = if upstream.is_empty() || tracking == "[gone]" {
+                None
+            } else {
+                let mut counts = (0, 0);
+                for part in tracking.trim_matches(['[', ']']).split(", ") {
+                    if let Some(number) = part.strip_prefix("ahead ") {
+                        counts.0 = number.parse().context("Invalid upstream ahead count")?;
+                    } else if let Some(number) = part.strip_prefix("behind ") {
+                        counts.1 = number.parse().context("Invalid upstream behind count")?;
+                    }
+                }
+                Some(counts)
+            };
             refs.push(Reference {
                 name: name.to_owned(),
                 kind,
                 full_name,
                 oid: String::from_utf8_lossy(fields[1]).into_owned(),
-                upstream: String::from_utf8_lossy(fields[2]).into_owned(),
+                upstream,
+                ahead: counts.map(|counts| counts.0),
+                behind: counts.map(|counts| counts.1),
                 current: fields[3] == b"*",
             });
         }
@@ -471,6 +595,8 @@ impl Repository {
         let upstream = current
             .map(|reference| reference.upstream.clone())
             .unwrap_or_default();
+        let ahead = current.and_then(|reference| reference.ahead);
+        let behind = current.and_then(|reference| reference.behind);
         let operation = [
             ("rebase-merge", "REBASING"),
             ("rebase-apply", "REBASING"),
@@ -492,6 +618,8 @@ impl Repository {
             branch: branch_description,
             head,
             upstream,
+            ahead,
+            behind,
             operation,
             elapsed_ms: started.elapsed().as_millis(),
         })
@@ -645,6 +773,9 @@ impl Repository {
             }
         }
         match target {
+            PreviewTarget::TreeFile { path, oid } => {
+                return self.tree_file_preview(path, oid, explicit, settings, cancel);
+            }
             PreviewTarget::File {
                 path,
                 old_path,

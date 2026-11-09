@@ -1,7 +1,7 @@
 use crate::{
     config::GuiConfig,
     git::{Operation, ReadOptions, Repository},
-    model::{Commit, CommitInspection, Preview, PreviewTarget, Reference, Snapshot},
+    model::{Commit, CommitInspection, FileEntry, Preview, PreviewTarget, Reference, Snapshot},
     process::Cancellation,
 };
 use std::{
@@ -87,6 +87,7 @@ pub enum WorkerEvent {
     History(u64, Result<HistoryPage, String>),
     Preview(u64, Result<Preview, String>),
     CommitFiles(u64, String, Result<CommitInspection, String>),
+    HeadTree(u64, String, Result<Vec<FileEntry>, String>),
     CommandDone(Result<String, String>),
 }
 
@@ -106,6 +107,7 @@ pub struct Workers {
     pub history: Latest<ReadOptions>,
     pub preview: Latest<PreviewRequest>,
     pub commit_files: Latest<String>,
+    pub head_tree: Latest<String>,
     pub commands: Sender<CommandRequest>,
     pub events: Receiver<WorkerEvent>,
     pub output: Receiver<Vec<u8>>,
@@ -181,6 +183,16 @@ impl Workers {
             }
         });
         let (commands, command_receiver) = mpsc::channel::<CommandRequest>();
+        let tree_repo = repo.clone();
+        let tree_events = events.clone();
+        let head_tree = Latest::spawn(move |id, oid: String, cancel: Cancellation| {
+            let result = tree_repo
+                .tree_files(&oid, &cancel)
+                .map_err(|error| format!("{error:#}"));
+            if !cancel.is_cancelled() {
+                let _ = tree_events.send(WorkerEvent::HeadTree(id, oid, result));
+            }
+        });
         let command_output = output.clone();
         thread::spawn(move || {
             while let Ok(request) = command_receiver.recv() {
@@ -201,6 +213,7 @@ impl Workers {
             history,
             preview,
             commit_files,
+            head_tree,
             commands,
             events: receiver,
             output: output_receiver,
