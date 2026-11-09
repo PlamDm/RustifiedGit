@@ -2,10 +2,7 @@ use crate::{
     actions::{self, Action},
     branches::{self, BranchRow},
     config::{Config, CustomCommand, State, key_matches},
-    git::{
-        HISTORY_PAGE_SIZE, Operation, ReadOptions, Repository, Step, discard_operation,
-        stage_operation,
-    },
+    git::{Operation, ReadOptions, Repository, Step, discard_operation, stage_operation},
     model::{CommitDetails, FileEntry, Panel, Preview, PreviewTarget, RefKind, Snapshot},
     patch::Patch,
     process::{Cancellation, CommandSpec},
@@ -35,6 +32,7 @@ pub enum Prompt {
     Stash,
     Shell(bool),
     HistoryPath,
+    HistoryLimit,
     Worktree(String),
     Custom {
         command: CustomCommand,
@@ -46,10 +44,14 @@ pub enum Prompt {
 #[derive(Clone)]
 pub enum MenuAction {
     Run(Operation, bool),
+    PullMenu,
+    PushMenu(Option<crate::model::Reference>),
     External(CommandSpec),
     Input(Prompt),
     SwitchRepo(PathBuf),
     HistoryClear,
+    HistoryLimit(usize),
+    HistoryMore,
     ToggleLog,
     ToggleUnchanged,
     ToggleFilter,
@@ -63,6 +65,10 @@ pub struct MenuItem {
 }
 
 pub enum Modal {
+    Busy {
+        running: String,
+        requested: String,
+    },
     Input {
         title: String,
         text: String,
@@ -204,7 +210,11 @@ impl App {
         state.remember(&repo.root);
         let options = ReadOptions {
             ignored: state.show_ignored,
-            commit_limit: HISTORY_PAGE_SIZE,
+            commit_limit: state
+                .commit_limit
+                .filter(|limit| *limit > 0)
+                .unwrap_or(config.git.commit_limit)
+                .max(1),
             graph: true,
             visible_refs: state
                 .visible_branches
@@ -336,7 +346,7 @@ impl App {
             .insert(self.repo.root.to_string_lossy().into_owned(), refs.clone());
         self.save_state();
         self.commit_tab = 0;
-        self.options.commit_limit = HISTORY_PAGE_SIZE;
+        self.options.commit_limit = self.history_page_size();
         self.loading = false;
         self.refresh();
     }
@@ -895,8 +905,65 @@ impl App {
         if self.history_loading || self.history_exhausted {
             return;
         }
-        self.options.commit_limit = self.options.commit_limit.saturating_add(HISTORY_PAGE_SIZE);
+        self.options.commit_limit = self
+            .options
+            .commit_limit
+            .saturating_add(self.history_page_size());
         self.request_history();
+    }
+
+    pub fn history_page_size(&self) -> usize {
+        self.state
+            .commit_limit
+            .filter(|limit| *limit > 0)
+            .unwrap_or(self.config.git.commit_limit)
+            .max(1)
+    }
+
+    fn set_history_limit(&mut self, limit: usize) -> Result<()> {
+        if limit == 0 {
+            bail!("Enter a positive number of commits");
+        }
+        self.state.commit_limit = Some(limit);
+        self.save_state();
+        self.options.commit_limit = limit;
+        self.request_history();
+        self.notice = format!(
+            "History initial/page size: {limit}; older commits load automatically near the end"
+        );
+        Ok(())
+    }
+
+    fn history_limit_menu(&mut self) {
+        let size = self.history_page_size();
+        let mut items = [100, 300, 1000, 5000, 10000]
+            .into_iter()
+            .map(|limit| MenuItem {
+                label: format!(
+                    "{} {limit} commits initially / per page",
+                    if size == limit { "●" } else { "○" }
+                ),
+                action: MenuAction::HistoryLimit(limit),
+            })
+            .collect::<Vec<_>>();
+        items.push(MenuItem {
+            label: "Custom initial/page size…".into(),
+            action: MenuAction::Input(Prompt::HistoryLimit),
+        });
+        if !self.history_exhausted && !self.history_loading {
+            items.push(MenuItem {
+                label: format!("Load more now (+{size}; automatic paging stays on)"),
+                action: MenuAction::HistoryMore,
+            });
+        }
+        self.menu(
+            format!(
+                "History loading · loaded {} · target {} · initial/page {size}",
+                self.snapshot.commits.len(),
+                self.options.commit_limit
+            ),
+            items,
+        );
     }
 
     fn target(&self) -> Option<PreviewTarget> {
@@ -1031,6 +1098,7 @@ impl App {
                     self.history_loading = false;
                     match result {
                         Ok(page) => {
+                            let selected_position = self.selected(Panel::Commits);
                             let selected_oid =
                                 self.selected_commit().map(|commit| commit.oid.clone());
                             self.history_exhausted = page.exhausted;
@@ -1041,7 +1109,7 @@ impl App {
                                     .filtered_commits()
                                     .iter()
                                     .position(|index| self.snapshot.commits[*index].oid == oid)
-                                    .unwrap_or(0);
+                                    .unwrap_or(selected_position);
                             }
                             if self.snapshot.commits.is_empty() {
                                 self.graph_working_tree = true;
@@ -1189,8 +1257,7 @@ impl App {
         &self.output_pending
     }
     pub fn run_operation(&mut self, operation: Operation) {
-        if self.busy.is_some() {
-            self.notice = "A command is running; Ctrl+c cancels it.".into();
+        if self.warn_if_busy(&operation.label) {
             return;
         }
         self.append_output(&format!("\n$ {}\n", operation.label));
@@ -1206,6 +1273,22 @@ impl App {
             Err(error) => self.error(error.to_string()),
         }
         self.dirty = true;
+    }
+    pub fn warn_if_busy(&mut self, requested: &str) -> bool {
+        let Some((_, _, running)) = &self.busy else {
+            return false;
+        };
+        let running = running.clone();
+        self.notice = format!("Another command is still running: {running}");
+        self.append_output(&format!(
+            "\n! Not started: {requested}\n  Another command is still running: {running}\n"
+        ));
+        self.modal = Some(Modal::Busy {
+            running,
+            requested: requested.to_owned(),
+        });
+        self.dirty = true;
+        true
     }
     pub fn error(&mut self, message: String) {
         self.notice = message.clone();
@@ -1455,6 +1538,9 @@ impl App {
         });
     }
     fn confirm(&mut self, operation: Operation) {
+        if self.warn_if_busy(&operation.label) {
+            return;
+        }
         self.modal = Some(Modal::Confirm {
             title: operation.label.clone(),
             operation,
@@ -1492,6 +1578,8 @@ impl App {
 
     fn execute_menu(&mut self, action: MenuAction) {
         match action {
+            MenuAction::PullMenu => self.pull_menu(),
+            MenuAction::PushMenu(reference) => self.push_menu(reference),
             MenuAction::Run(operation, confirm) => {
                 if confirm {
                     self.confirm(operation)
@@ -1507,6 +1595,12 @@ impl App {
                 self.loading = false;
                 self.refresh();
             }
+            MenuAction::HistoryLimit(limit) => {
+                if let Err(error) = self.set_history_limit(limit) {
+                    self.error(format!("{error:#}"));
+                }
+            }
+            MenuAction::HistoryMore => self.load_more_history(),
             MenuAction::ToggleLog => {
                 self.state.hide_command_log = !self.state.hide_command_log;
                 self.save_state();
@@ -1536,6 +1630,9 @@ impl App {
             Prompt::Shell(false) => "Run command (live output in pane 8)",
             Prompt::Shell(true) => "Run interactive command",
             Prompt::HistoryPath => "Filter commit history by repository-relative path",
+            Prompt::HistoryLimit => {
+                "Commit initial/page size (positive number; automatic paging stays on)"
+            }
             Prompt::Worktree(_) => "New worktree path",
             Prompt::Custom { command, index, .. } => command
                 .prompts
@@ -1554,6 +1651,7 @@ impl App {
                 .map(|commit| commit.subject.clone())
                 .unwrap_or_default(),
             Prompt::RenameBranch(name) => name.clone(),
+            Prompt::HistoryLimit => self.history_page_size().to_string(),
             _ => String::new(),
         };
         self.prompt(title, purpose, text);
@@ -1643,6 +1741,13 @@ impl App {
                 }
                 self.run_operation(Operation::git(args));
             }
+            Prompt::HistoryLimit => {
+                let limit = text
+                    .trim()
+                    .parse::<usize>()
+                    .context("Enter a positive whole number of commits")?;
+                self.set_history_limit(limit)?;
+            }
             Prompt::Custom {
                 command,
                 mut values,
@@ -1668,6 +1773,11 @@ impl App {
             return Ok(());
         };
         match modal {
+            Modal::Busy { running, requested } => {
+                if !matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q')) {
+                    self.modal = Some(Modal::Busy { running, requested });
+                }
+            }
             Modal::Input {
                 title,
                 mut text,
@@ -1827,6 +1937,12 @@ impl App {
     }
 
     fn key(&mut self, key: KeyEvent) -> Result<()> {
+        if key_matches("<ctrl+c>", key) && self.busy.is_some() {
+            self.busy.as_ref().unwrap().0.cancel();
+            self.notice = "Cancelling command…".into();
+            self.modal = None;
+            return Ok(());
+        }
         if self.modal.is_some() {
             return self.handle_modal(key);
         }
@@ -2162,6 +2278,10 @@ impl App {
             }
             return Ok(());
         }
+        if self.focus == Panel::Commits && self.is("commits", "setHistoryLimit", &["L"], key) {
+            self.history_limit_menu();
+            return Ok(());
+        }
         if self.focus == Panel::Commits && key_matches(".", key) {
             self.load_more_history();
             return Ok(());
@@ -2189,14 +2309,16 @@ impl App {
             self.refresh();
             return Ok(());
         }
-        if self.is("universal", "pull", &["p"], key) && self.focus != Panel::Commits {
-            self.run_operation(Operation::git(["pull"]));
+        if self.is("universal", "pull", &["p"], key) {
+            self.pull_menu();
             return Ok(());
         }
-        if self.is("universal", "push", &["P"], key)
-            && !matches!(self.focus, Panel::Branches | Panel::RemoteBranches)
-        {
-            self.run_operation(Operation::git(["push"]));
+        if self.is("universal", "push", &["P"], key) {
+            let reference = matches!(self.focus, Panel::Branches | Panel::RemoteBranches)
+                .then(|| self.selected_ref().cloned())
+                .flatten()
+                .filter(|reference| matches!(reference.kind, RefKind::Branch | RefKind::Tag));
+            self.push_menu(reference);
             return Ok(());
         }
         if self.is("universal", "createRebaseOptionsMenu", &["m"], key) {
@@ -2689,15 +2811,6 @@ impl App {
                     &reference.name,
                     &branch,
                 ]));
-            } else if key_matches("P", key) && reference.kind == RefKind::Tag {
-                self.run_operation(Operation::git(["push", "origin", &reference.full_name]));
-            } else if key_matches("P", key) {
-                self.run_operation(Operation::git([
-                    "push",
-                    "--set-upstream",
-                    "origin",
-                    &reference.name,
-                ]));
             } else if key_matches("f", key) {
                 self.run_operation(Operation::git(["fetch", "--all", "--prune", "--progress"]));
             }
@@ -2879,6 +2992,146 @@ impl App {
             .collect();
         self.menu("Recent repositories", items);
     }
+    fn pull_menu(&mut self) {
+        if self.warn_if_busy("Open pull options") {
+            return;
+        }
+        let current = self
+            .snapshot
+            .references
+            .iter()
+            .find(|reference| reference.current);
+        let title = current.map_or_else(
+            || "Pull · current branch".into(),
+            |reference| {
+                format!(
+                    "Pull · {} ← {}",
+                    reference.name,
+                    if reference.upstream.is_empty() {
+                        "configured remote"
+                    } else {
+                        &reference.upstream
+                    }
+                )
+            },
+        );
+        self.menu(
+            title,
+            vec![
+                run_item(
+                    "Fast-forward only (stop if branches diverged)",
+                    ["pull", "--ff-only", "--progress"],
+                    false,
+                ),
+                run_item(
+                    "Merge remote changes (allow fast-forward)",
+                    ["pull", "--no-rebase", "--ff", "--progress"],
+                    false,
+                ),
+                run_item(
+                    "Rebase local commits onto upstream",
+                    ["pull", "--rebase", "--ff", "--progress"],
+                    false,
+                ),
+                run_item(
+                    "Rebase + autostash tracked working changes",
+                    ["pull", "--rebase", "--ff", "--autostash", "--progress"],
+                    false,
+                ),
+                MenuItem {
+                    label: "Overwrite local branch and tracked changes with upstream…".into(),
+                    action: MenuAction::Run(crate::git::pull_overwrite_operation(), true),
+                },
+                run_item(
+                    "Fetch only (leave local commits and files as they are)",
+                    ["fetch", "--prune", "--progress"],
+                    false,
+                ),
+            ],
+        );
+    }
+    fn push_menu(&mut self, reference: Option<crate::model::Reference>) {
+        if self.warn_if_busy("Open push options") {
+            return;
+        }
+        let reference =
+            reference.filter(|reference| !reference.current || reference.kind == RefKind::Tag);
+        let title = reference.as_ref().map_or_else(
+            || {
+                format!(
+                    "Push · {} → configured remote",
+                    self.snapshot
+                        .references
+                        .iter()
+                        .find(|reference| reference.current)
+                        .map_or("HEAD", |reference| reference.name.as_str())
+                )
+            },
+            |reference| format!("Push · {} → origin", reference.name),
+        );
+        let operation = |flag: Option<&str>| {
+            let mut args: Vec<OsString> = vec!["push".into(), "--progress".into()];
+            if let Some(flag) = flag {
+                args.push(flag.into());
+            }
+            if let Some(reference) = &reference {
+                if reference.kind == RefKind::Branch {
+                    args.push("--set-upstream".into());
+                }
+                args.extend(["origin".into(), reference.full_name.clone().into()]);
+            }
+            Operation::git(args)
+        };
+        let mut lease = operation(Some("--force-with-lease"));
+        lease.label = format!(
+            "Replace remote history only if its tip matches the known remote ref: {}",
+            lease.label
+        );
+        let mut force = operation(Some("--force"));
+        force.label = format!(
+            "Overwrite remote history, including commits made by others: {}",
+            force.label
+        );
+        let mut items = vec![
+            MenuItem {
+                label: "Push normally".into(),
+                action: MenuAction::Run(operation(None), false),
+            },
+            MenuItem {
+                label: "Force push with lease (check known remote tip)…".into(),
+                action: MenuAction::Run(lease, true),
+            },
+            MenuItem {
+                label: "Force push (overwrite remote history)…".into(),
+                action: MenuAction::Run(force, true),
+            },
+            MenuItem {
+                label: "Dry run (preview without updating remote)".into(),
+                action: MenuAction::Run(operation(Some("--dry-run")), false),
+            },
+        ];
+        if reference.is_none() {
+            if let Some(current) = self
+                .snapshot
+                .references
+                .iter()
+                .find(|reference| reference.current)
+            {
+                items.push(run_item(
+                    "Set upstream and push current branch to origin",
+                    [
+                        "push",
+                        "--progress",
+                        "--set-upstream",
+                        "origin",
+                        &current.full_name,
+                    ],
+                    false,
+                ));
+            }
+        }
+        self.menu(title, items);
+    }
     fn repository_menu(&mut self) {
         let mut items = vec![
             run_item(
@@ -2886,8 +3139,14 @@ impl App {
                 ["fetch", "--all", "--prune", "--progress"],
                 false,
             ),
-            run_item("Pull", ["pull"], false),
-            run_item("Push", ["push"], false),
+            MenuItem {
+                label: "Pull options…".into(),
+                action: MenuAction::PullMenu,
+            },
+            MenuItem {
+                label: "Push options…".into(),
+                action: MenuAction::PushMenu(None),
+            },
             run_item(
                 "Initialize/update all submodules",
                 ["submodule", "update", "--init", "--recursive", "--progress"],

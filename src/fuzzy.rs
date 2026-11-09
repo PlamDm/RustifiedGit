@@ -117,6 +117,79 @@ impl Query {
             .all(|term| term.matches(&text) != term.excluded)
     }
 
+    /// Original Unicode character indices matched by the query, sorted and
+    /// deduplicated. Exclusions filter candidates but never highlight text.
+    /// Fuzzy terms use the same best-scoring alignment as [`Self::score`].
+    pub fn positions(&self, text: &str) -> Option<Vec<usize>> {
+        if self.terms.is_empty() {
+            return Some(Vec::new());
+        }
+        let normalized = self.normalize(text);
+        if !self
+            .terms
+            .iter()
+            .all(|term| term.matches(&normalized) != term.excluded)
+        {
+            return None;
+        }
+        let (characters, bonuses, original) = self.characters(text, &normalized, true);
+        let mut result = Vec::new();
+        for term in self.terms.iter().filter(|term| !term.excluded) {
+            let positions = match term.kind {
+                Kind::Fuzzy => fuzzy_positions(&characters, &bonuses, &term.chars),
+                _ => {
+                    let start = if matches!(term.kind, Kind::Suffix) {
+                        normalized.len() - term.text.len()
+                    } else {
+                        normalized.find(&term.text).unwrap_or(0)
+                    };
+                    let start = normalized[..start].chars().count();
+                    (start..start + term.chars.len()).collect()
+                }
+            };
+            result.extend(
+                positions
+                    .into_iter()
+                    .filter_map(|index| original.get(index).copied()),
+            );
+        }
+        result.sort_unstable();
+        result.dedup();
+        Some(result)
+    }
+
+    fn characters(
+        &self,
+        text: &str,
+        normalized: &str,
+        map_original: bool,
+    ) -> (Vec<char>, Vec<i64>, Vec<usize>) {
+        let mut bonuses = Vec::new();
+        let mut original = Vec::new();
+        let mut previous: Option<char> = None;
+        for (source, character) in text.chars().enumerate() {
+            let bonus = match previous {
+                None => 12,
+                Some(before) if !before.is_alphanumeric() => 12,
+                Some(before) if before.is_lowercase() && character.is_uppercase() => 8,
+                _ => 0,
+            };
+            let count = if self.case_sensitive {
+                1
+            } else {
+                character.to_lowercase().count()
+            };
+            for index in 0..count {
+                bonuses.push(if index == 0 { bonus } else { 0 });
+                if map_original {
+                    original.push(source);
+                }
+            }
+            previous = Some(character);
+        }
+        (normalized.chars().collect(), bonuses, original)
+    }
+
     /// Higher scores prefer consecutive matches, word/path boundaries and
     /// earlier matches. `None` means at least one term does not match.
     pub fn score(&self, text: &str) -> Option<i64> {
@@ -131,27 +204,7 @@ impl Query {
         {
             return None;
         }
-        let mut characters = Vec::new();
-        let mut bonuses = Vec::new();
-        let mut previous: Option<char> = None;
-        for character in text.chars() {
-            let bonus = match previous {
-                None => 12,
-                Some(before) if !before.is_alphanumeric() => 12,
-                Some(before) if before.is_lowercase() && character.is_uppercase() => 8,
-                _ => 0,
-            };
-            if self.case_sensitive {
-                characters.push(character);
-                bonuses.push(bonus);
-            } else {
-                for (index, lower) in character.to_lowercase().enumerate() {
-                    characters.push(lower);
-                    bonuses.push(if index == 0 { bonus } else { 0 });
-                }
-            }
-            previous = Some(character);
-        }
+        let (characters, bonuses, _) = self.characters(text, &normalized, false);
         let mut total = 0;
         for term in self.terms.iter().filter(|term| !term.excluded) {
             total += match term.kind {
@@ -209,4 +262,78 @@ fn fuzzy_score(text: &[char], bonuses: &[i64], needle: &[char]) -> i64 {
         std::mem::swap(&mut previous, &mut current);
     }
     previous.into_iter().max().unwrap_or(0)
+}
+
+fn fuzzy_positions(text: &[char], bonuses: &[i64], needle: &[char]) -> Vec<usize> {
+    const MISS: i64 = i64::MIN / 4;
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    // Backtracking is only used for visible labels. Keep unusual long subjects
+    // or pasted queries from allocating an unbounded matrix in the renderer.
+    if needle.len().saturating_mul(text.len()) > 1_000_000 {
+        let mut next = 0;
+        return needle
+            .iter()
+            .filter_map(|wanted| {
+                let found = text[next..].iter().position(|actual| actual == wanted)? + next;
+                next = found + 1;
+                Some(found)
+            })
+            .collect();
+    }
+    let mut previous = vec![MISS; text.len()];
+    let mut current = vec![MISS; text.len()];
+    let mut trace = vec![vec![usize::MAX; text.len()]; needle.len()];
+    for (matched, wanted) in needle.iter().enumerate() {
+        current.fill(MISS);
+        let mut best_gap = MISS;
+        let mut gap_index = usize::MAX;
+        for (index, actual) in text.iter().enumerate() {
+            if index > 0 {
+                let candidate = previous[index - 1] + index as i64 - 1;
+                if candidate > best_gap {
+                    best_gap = candidate;
+                    gap_index = index - 1;
+                }
+            }
+            if actual != wanted {
+                continue;
+            }
+            current[index] = if matched == 0 {
+                16 + bonuses[index] - (index as i64).min(24)
+            } else {
+                let adjacent = if index > 0 {
+                    previous[index - 1] + 24
+                } else {
+                    MISS
+                };
+                let separated = best_gap - index as i64 + 13;
+                trace[matched][index] = if adjacent >= separated {
+                    index.saturating_sub(1)
+                } else {
+                    gap_index
+                };
+                adjacent.max(separated) + bonuses[index]
+            };
+        }
+        std::mem::swap(&mut previous, &mut current);
+    }
+    let Some(mut index) = previous
+        .iter()
+        .enumerate()
+        .max_by(|(a_index, a), (b_index, b)| a.cmp(b).then_with(|| b_index.cmp(a_index)))
+        .map(|(index, _)| index)
+    else {
+        return Vec::new();
+    };
+    let mut positions = Vec::with_capacity(needle.len());
+    for matched in (0..needle.len()).rev() {
+        positions.push(index);
+        if matched > 0 {
+            index = trace[matched][index];
+        }
+    }
+    positions.reverse();
+    positions
 }

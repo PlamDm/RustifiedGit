@@ -12,7 +12,10 @@ use std::{
     ffi::OsString,
     fs,
     path::{Component, Path, PathBuf},
-    sync::{Arc, Mutex, mpsc::SyncSender},
+    sync::{
+        Arc, Mutex,
+        mpsc::{SyncSender, TrySendError},
+    },
     thread,
     time::{Duration, Instant, SystemTime},
 };
@@ -1041,10 +1044,28 @@ impl Repository {
         stream: Option<SyncSender<Vec<u8>>>,
     ) -> Result<String> {
         let mut summary = String::new();
+        let log_step = |message: String| -> Result<()> {
+            let Some(stream) = &stream else {
+                return Ok(());
+            };
+            let mut message = message.into_bytes();
+            loop {
+                cancel.check()?;
+                match stream.try_send(message) {
+                    Ok(()) => return Ok(()),
+                    Err(TrySendError::Full(pending)) => {
+                        message = pending;
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(TrySendError::Disconnected(_)) => bail!("Command output receiver closed"),
+                }
+            }
+        };
         for step in &operation.steps {
             cancel.check()?;
             match step {
                 Step::Command(command) => {
+                    log_step(format!("> {}\n", command.label))?;
                     let output = process::run(
                         &self.root,
                         command,
@@ -1063,6 +1084,7 @@ impl Repository {
                 }
                 Step::DeleteUntracked(path) => {
                     validate_path(path)?;
+                    log_step(format!("> Remove untracked path {path:?}\n"))?;
                     // Revalidate immediately before deletion; an external process may have staged it.
                     let output = process::run(
                         &self.root,
@@ -1094,6 +1116,7 @@ impl Repository {
                 }
                 Step::AppendIgnore(path) => {
                     validate_path(path)?;
+                    log_step(format!("> Add {path:?} to .gitignore\n"))?;
                     use std::io::Write;
                     let text = path
                         .to_str()
@@ -1226,6 +1249,34 @@ pub fn nuke_working_tree_operation() -> Operation {
     ];
     Operation {
         label: "Nuke working tree: stash submodule changes, reset submodules and HEAD, clean untracked files (keeps ignored files)".into(),
+        steps: commands.into_iter().map(Step::Command).collect(),
+    }
+}
+
+pub fn pull_overwrite_operation() -> Operation {
+    let commands = vec![
+        // Resolve before fetching, then again after pruning: never reset to an
+        // absent or guessed remote branch.
+        CommandSpec::git(["rev-parse", "--verify", "@{upstream}"]),
+        CommandSpec::git(["fetch", "--prune", "--progress"]),
+        CommandSpec::git(["rev-parse", "--verify", "@{upstream}"]),
+        CommandSpec::git([
+            "submodule",
+            "foreach",
+            "--recursive",
+            "git stash push --include-untracked",
+        ]),
+        CommandSpec::git(["reset", "--hard", "@{upstream}"]),
+        CommandSpec::git([
+            "submodule",
+            "update",
+            "--force",
+            "--recursive",
+            "--progress",
+        ]),
+    ];
+    Operation {
+        label: "Overwrite local branch with its fetched upstream: discard local-only commits and tracked changes; stash submodule changes (keeps unrelated untracked files)".into(),
         steps: commands.into_iter().map(Step::Command).collect(),
     }
 }

@@ -574,11 +574,6 @@ pub fn for_app(app: &App) -> Vec<Action> {
                             "Worktree from reference…",
                             "Enter a new worktree path based on this reference.",
                         );
-                        catalog.key(
-                            "P",
-                            "Push selected reference",
-                            "Push the selected branch or tag to origin.",
-                        );
                         if reference.kind != RefKind::Tag {
                             catalog.key(
                                 "u",
@@ -859,11 +854,19 @@ pub fn for_app(app: &App) -> Vec<Action> {
         }
     }
     if app.focus == Panel::Commits {
+        catalog.add(
+            "commits", "setHistoryLimit", "L", "Loaded commits…",
+            &format!("Choose initial/page size (currently {}); {} commits loaded, target {}. Older commits still load automatically near the end.",
+                app.history_page_size(), app.snapshot.commits.len(), app.options.commit_limit),
+        );
         if !app.history_exhausted {
             catalog.key(
                 ".",
                 "Load older commits",
-                "Load another 1,000 commits while keeping the selection.",
+                &format!(
+                    "Load another {} commits while keeping the selection.",
+                    app.history_page_size()
+                ),
             );
         }
         if writable {
@@ -993,24 +996,20 @@ pub fn for_app(app: &App) -> Vec<Action> {
         "Choose another recent repository.",
     );
     if writable {
-        if app.focus != Panel::Commits {
-            catalog.add(
-                "universal",
-                "pull",
-                "p",
-                "Pull",
-                "Pull remote updates into the current branch.",
-            );
-        }
-        if !matches!(app.focus, Panel::Branches | Panel::RemoteBranches) {
-            catalog.add(
-                "universal",
-                "push",
-                "P",
-                "Push",
-                "Push the current branch to its configured remote.",
-            );
-        }
+        catalog.add(
+            "universal",
+            "pull",
+            "p",
+            "Pull options…",
+            "Choose fast-forward, merge, rebase, autostash, or confirmed overwrite of local changes and commits.",
+        );
+        catalog.add(
+            "universal",
+            "push",
+            "P",
+            "Push options…",
+            "Choose normal push, dry run, force with lease, or confirmed force push for the current or selected local reference.",
+        );
         catalog.add(
             "universal",
             "executeShellCommand",

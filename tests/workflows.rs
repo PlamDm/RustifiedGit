@@ -239,10 +239,13 @@ fn cancellation_also_handles_a_shell_that_exits_before_its_children() {
             Some(sender),
         )
     });
-    assert!(
-        String::from_utf8_lossy(&receiver.recv_timeout(Duration::from_secs(2)).unwrap())
-            .contains("ready")
-    );
+    let chunk = loop {
+        let chunk = receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+        if !chunk.starts_with(b"> ") {
+            break chunk;
+        }
+    };
+    assert!(String::from_utf8_lossy(&chunk).contains("ready"));
     cancel.cancel();
     assert!(handle.join().unwrap().is_err());
 }
@@ -575,6 +578,140 @@ fn discard_restores_tracked_changes_without_deleting_ignored_files() {
     assert!(fixture.dir.path().join("private.log").exists());
 }
 
+#[test]
+fn overwrite_pull_fetches_upstream_and_preserves_unrelated_untracked_files() {
+    let source = Fixture::new();
+    source.write("tracked.txt", "initial\n");
+    source.commit("initial");
+    let remote = tempfile::tempdir().unwrap();
+    git(remote.path(), ["init", "--bare", "-q"]);
+    git(
+        source.dir.path(),
+        [
+            OsStr::new("remote"),
+            OsStr::new("add"),
+            OsStr::new("origin"),
+            remote.path().as_os_str(),
+        ],
+    );
+    git(source.dir.path(), ["push", "-qu", "origin", "main"]);
+    let local = Fixture::new();
+    git(
+        local.dir.path(),
+        [
+            OsStr::new("remote"),
+            OsStr::new("add"),
+            OsStr::new("origin"),
+            remote.path().as_os_str(),
+        ],
+    );
+    git(local.dir.path(), ["fetch", "-q", "origin"]);
+    git(local.dir.path(), ["reset", "--hard", "origin/main"]);
+    git(
+        local.dir.path(),
+        ["branch", "--set-upstream-to=origin/main", "main"],
+    );
+    local.write("local-only.txt", "local commit\n");
+    local.commit("local-only commit");
+    local.write("tracked.txt", "dirty tracked changes\n");
+    local.write("unrelated-untracked.txt", "keep me\n");
+    source.write("tracked.txt", "upstream contents\n");
+    source.commit("upstream commit");
+    git(source.dir.path(), ["push", "-q", "origin", "main"]);
+    local.execute(pd_lazygit::git::pull_overwrite_operation());
+    assert_eq!(
+        git(local.dir.path(), ["rev-parse", "HEAD"]),
+        git(source.dir.path(), ["rev-parse", "HEAD"])
+    );
+    assert_eq!(
+        fs::read_to_string(local.dir.path().join("tracked.txt")).unwrap(),
+        "upstream contents\n"
+    );
+    assert!(!local.dir.path().join("local-only.txt").exists());
+    assert_eq!(
+        fs::read_to_string(local.dir.path().join("unrelated-untracked.txt")).unwrap(),
+        "keep me\n"
+    );
+
+    // A later failed fetch must leave both staged and unstaged changes intact.
+    local.write("tracked.txt", "staged contents\n");
+    git(local.dir.path(), ["add", "tracked.txt"]);
+    local.write("tracked.txt", "unstaged contents\n");
+    git(
+        local.dir.path(),
+        [
+            OsStr::new("remote"),
+            OsStr::new("set-url"),
+            OsStr::new("origin"),
+            remote.path().join("absent.git").as_os_str(),
+        ],
+    );
+    let head = git(local.dir.path(), ["rev-parse", "HEAD"]);
+    let index = git(local.dir.path(), ["diff", "--cached"]);
+    assert!(
+        local
+            .repo
+            .execute(
+                &pd_lazygit::git::pull_overwrite_operation(),
+                &Cancellation::default(),
+                None
+            )
+            .is_err()
+    );
+    assert_eq!(git(local.dir.path(), ["rev-parse", "HEAD"]), head);
+    assert_eq!(git(local.dir.path(), ["diff", "--cached"]), index);
+    assert_eq!(
+        fs::read_to_string(local.dir.path().join("tracked.txt")).unwrap(),
+        "unstaged contents\n"
+    );
+}
+
+#[test]
+fn overwrite_pull_without_upstream_never_discards_local_changes() {
+    let fixture = Fixture::new();
+    fixture.write("tracked.txt", "committed\n");
+    fixture.commit("initial");
+    fixture.write("tracked.txt", "dirty\n");
+    let head = git(fixture.dir.path(), ["rev-parse", "HEAD"]);
+    assert!(
+        fixture
+            .repo
+            .execute(
+                &pd_lazygit::git::pull_overwrite_operation(),
+                &Cancellation::default(),
+                None
+            )
+            .is_err()
+    );
+    assert_eq!(git(fixture.dir.path(), ["rev-parse", "HEAD"]), head);
+    assert_eq!(
+        fs::read_to_string(fixture.dir.path().join("tracked.txt")).unwrap(),
+        "dirty\n"
+    );
+}
+
+#[test]
+fn quiet_operations_stream_the_actual_command_steps() {
+    let fixture = Fixture::new();
+    let (sender, receiver) = mpsc::sync_channel(4);
+    let operation = Operation::git(["config", "test.commandLog", "recorded"]);
+    let summary = fixture
+        .repo
+        .execute(&operation, &Cancellation::default(), Some(sender))
+        .unwrap();
+    assert!(summary.is_empty());
+    let output = receiver.into_iter().flatten().collect::<Vec<_>>();
+    assert!(
+        String::from_utf8(output)
+            .unwrap()
+            .contains("> git config test.commandLog recorded\n")
+    );
+    assert_eq!(
+        git(fixture.dir.path(), ["config", "test.commandLog"]).trim(),
+        "recorded"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn command_output_streams_before_completion_and_cancellation_stops_process_group() {
@@ -591,7 +728,12 @@ fn command_output_streams_before_completion_and_cancellation_stops_process_group
             Some(output),
         )
     });
-    let chunk = receiver.recv_timeout(Duration::from_secs(3)).unwrap();
+    let chunk = loop {
+        let chunk = receiver.recv_timeout(Duration::from_secs(3)).unwrap();
+        if !chunk.starts_with(b"> ") {
+            break chunk;
+        }
+    };
     assert!(String::from_utf8_lossy(&chunk).contains("ready"));
     cancel.cancel();
     assert!(handle.join().unwrap().is_err());

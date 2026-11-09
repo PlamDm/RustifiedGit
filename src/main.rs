@@ -10,7 +10,7 @@ use crossterm::{
 use pd_lazygit::{
     app::App,
     config::{Config, State},
-    git::{HISTORY_PAGE_SIZE, ReadOptions, Repository},
+    git::{ReadOptions, Repository},
     model::Panel,
     process::Cancellation,
     ui,
@@ -74,7 +74,7 @@ fn main() -> Result<()> {
     let options = ReadOptions {
         history_path: args.filter,
         history_directory,
-        commit_limit: HISTORY_PAGE_SIZE,
+        commit_limit: config.git.commit_limit,
         ..ReadOptions::default()
     };
     if args.snapshot {

@@ -41,12 +41,14 @@ impl Default for GuiConfig {
 pub struct GitConfig {
     pub auto_refresh: bool,
     pub auto_fetch: bool,
+    pub commit_limit: usize,
 }
 impl Default for GitConfig {
     fn default() -> Self {
         Self {
             auto_refresh: true,
             auto_fetch: true,
+            commit_limit: crate::git::HISTORY_PAGE_SIZE,
         }
     }
 }
@@ -121,6 +123,7 @@ pub struct State {
     pub recent_repos: Vec<PathBuf>,
     pub hide_command_log: bool,
     pub visible_branches: BTreeMap<String, Vec<String>>,
+    pub commit_limit: Option<usize>,
 }
 impl Default for State {
     fn default() -> Self {
@@ -130,6 +133,7 @@ impl Default for State {
             recent_repos: Vec::new(),
             hide_command_log: true,
             visible_branches: BTreeMap::new(),
+            commit_limit: None,
         }
     }
 }
@@ -180,6 +184,9 @@ impl Config {
         config.refresher.refresh_interval = config.refresher.refresh_interval.max(1);
         config.refresher.fetch_interval = config.refresher.fetch_interval.max(30);
         config.gui.command_log_size = config.gui.command_log_size.clamp(100, 100_000);
+        if config.git.commit_limit == 0 {
+            bail!("git.commitLimit must be a positive number of commits");
+        }
         if config
             .gui
             .branch_group_delimiter

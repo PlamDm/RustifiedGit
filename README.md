@@ -107,13 +107,21 @@ Type to filter, use arrows or Ctrl+n/p to select, Enter to keep the filter,
 and Esc to cancel and restore the previous selection. Esc after accepting
 clears the filter. Commit matches are ranked, prioritizing subjects; file
 matches retain their directory hierarchy and reveal collapsed descendants.
+Matched letters are yellow, bold and underlined in graph rows and file paths,
+including after you accept the filter.
 Terms separated by spaces must all match; `'term` requires a literal substring,
 `!term` excludes one, and `^` / `$` anchor terms. Lowercase queries ignore case;
 uppercase queries use smart case. This is built in and needs no fzf executable.
 
 Local branches also provide tags and worktrees through `[`/`]`. Graph history
-loads the first 1,000 commits independently of file status, then automatically
-loads another 1,000 when you approach the end. `.` explicitly loads another page.
+loads the first 1,000 commits independently of file status by default. In the
+graph, open `o` → **Loaded commits…** (or press `L`) to choose an initial/page
+size from presets or enter a custom positive number. The menu shows the actual
+loaded count and current requested target. Your choice persists across restarts;
+`git.commitLimit` in YAML sets the default when no saved choice exists.
+Older commits still load automatically near the end, one chosen page at a time;
+`.` or **Load more now** explicitly requests another page. This sets the initial
+amount and page size, rather than a fixed cap on all history loading.
 The count's `+` means older commits remain. History is reused while refs and
 filters stay unchanged. A search covers loaded commits (subject, hash, author, committer and ref labels),
 then ranks matches and hides edges between omitted rows. It does not scan the
@@ -143,6 +151,21 @@ git -C /path/to/repo commit-graph write --reachable
 - `8` focuses live command output. Long operations run in the background; their
   output stays visible. `Ctrl+c` cancels their process group, including child
   Git/SSH/hook processes. Read workers cancel stale selections separately.
+  Invoking another operation opens a popup naming the active and blocked commands;
+  the new command is not queued. Enter/Esc dismisses it; Ctrl+c cancels the active
+  command even while the popup is open. The log also records each command step.
+
+`p` opens pull options: fast-forward only, merge, rebase, rebase with autostash,
+fetch only, or overwrite the local branch with its fetched upstream. Overwrite
+requires confirmation and discards local-only commits and tracked changes; it
+stashes submodule changes and keeps unrelated untracked files. An unavailable
+upstream or failed fetch stops the operation before reset.
+
+`P` opens push options: normal, force with lease, force, dry run, or set upstream
+and push to origin. Force modes require confirmation. Current-branch pushes use
+Git's configured destination; selecting another local branch or tag in the branch
+pane targets that reference at origin, named in the menu title. Repository actions
+and context actions open the same option menus.
 
 Standard workflows include whole-file, directory, hunk and individual-line
 staging/unstaging, discarding, commit/amend/editor, branches, tags, remotes,

@@ -10,6 +10,7 @@ gui:
 git:
   autoRefresh: true
   autoFetch: true
+  commitLimit: 1000
 refresher:
   refreshInterval: 3
   fetchInterval: 600

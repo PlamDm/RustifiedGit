@@ -588,6 +588,68 @@ fn short_date(date: &str) -> String {
         .unwrap_or_else(|| "—".into())
 }
 
+fn highlighted_spans(spans: Vec<Span<'static>>, positions: &[usize]) -> Vec<Span<'static>> {
+    if positions.is_empty() {
+        return spans;
+    }
+    let mut result = Vec::new();
+    let mut offset = 0;
+    for span in spans {
+        let mut text = String::new();
+        let mut highlighted = false;
+        for (index, character) in span.content.chars().enumerate() {
+            let matched = positions.binary_search(&(offset + index)).is_ok();
+            if !text.is_empty() && matched != highlighted {
+                result.push(Span::styled(
+                    std::mem::take(&mut text),
+                    if highlighted {
+                        span.style
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+                    } else {
+                        span.style
+                    },
+                ));
+            }
+            highlighted = matched;
+            text.push(character);
+        }
+        offset += span.content.chars().count();
+        if !text.is_empty() {
+            result.push(Span::styled(
+                text,
+                if highlighted {
+                    span.style
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+                } else {
+                    span.style
+                },
+            ));
+        }
+    }
+    result
+}
+
+fn highlighted_elide(
+    text: &str,
+    width: usize,
+    positions: &[usize],
+    style: Style,
+) -> Vec<Span<'static>> {
+    let displayed = elide(text, width);
+    let retained = displayed
+        .chars()
+        .count()
+        .saturating_sub(usize::from(displayed != text));
+    let positions: Vec<_> = positions
+        .iter()
+        .copied()
+        .filter(|index| *index < retained)
+        .collect();
+    highlighted_spans(vec![Span::styled(displayed, style)], &positions)
+}
+
 fn fit_spans(spans: Vec<Span<'static>>, width: usize) -> Vec<Span<'static>> {
     let mut result = Vec::new();
     let mut remaining = width;
@@ -626,6 +688,7 @@ fn draw_graph(frame: &mut Frame, area: Rect, app: &mut App) {
     }
     let mut items = Vec::with_capacity(height);
     let content_width = area.width.saturating_sub(4) as usize;
+    let query = crate::fuzzy::Query::new(app.search(Panel::Commits));
     for row in rows.iter().skip(offset).take(height) {
         let mut spans = graph_spans(&row.prefix);
         if row.logical.is_some() && row.commit_index.is_none() {
@@ -644,6 +707,43 @@ fn draw_graph(frame: &mut Frame, area: Rect, app: &mut App) {
             ));
         } else if let Some(index) = row.commit_index {
             let commit = &app.snapshot.commits[index];
+            let subject = clean(&commit.subject);
+            let decorations = clean(&commit.decorations);
+            let subject_offset = commit.oid.chars().count() + 1;
+            let (matches, decorations_offset) = if app.search(Panel::Commits).is_empty() {
+                (Vec::new(), 0)
+            } else {
+                let author = clean(&commit.author);
+                let committer = clean(&commit.committer);
+                let candidate = format!(
+                    "{} {subject} {author} {committer} {decorations}",
+                    commit.oid
+                );
+                (
+                    query.positions(&candidate).unwrap_or_default(),
+                    subject_offset
+                        + subject.chars().count()
+                        + author.chars().count()
+                        + committer.chars().count()
+                        + 3,
+                )
+            };
+            let subject_matches = query.positions(&subject).unwrap_or_else(|| {
+                matches
+                    .iter()
+                    .copied()
+                    .filter(|index| {
+                        *index >= subject_offset
+                            && *index < subject_offset + subject.chars().count()
+                    })
+                    .map(|index| index - subject_offset)
+                    .collect()
+            });
+            let hash_matches: Vec<_> = matches
+                .iter()
+                .copied()
+                .filter(|index| *index < commit.short.chars().count())
+                .collect();
             let metadata = format!(
                 "{} {}",
                 initials(if commit.committer.is_empty() {
@@ -670,33 +770,51 @@ fn draw_graph(frame: &mut Frame, area: Rect, app: &mut App) {
             }
             let available = left_width.saturating_sub(spans.iter().map(Span::width).sum());
             let hash_budget = available.saturating_sub(3).min(commit.short.len());
-            spans.push(Span::styled(
-                if hash_budget > 0 {
-                    format!("{} ", elide(&commit.short, hash_budget))
-                } else {
-                    String::new()
-                },
-                Style::default().fg(Color::Yellow),
-            ));
+            if hash_budget > 0 {
+                spans.extend(highlighted_elide(
+                    &commit.short,
+                    hash_budget,
+                    &hash_matches,
+                    Style::default().fg(Color::Yellow),
+                ));
+                spans.push(Span::raw(" "));
+            }
             if !commit.decorations.is_empty() {
                 let used: usize = spans.iter().map(Span::width).sum();
                 let remaining = left_width.saturating_sub(used);
                 let budget = (remaining / 3).min(26);
                 if budget >= 5 {
-                    let labels = clean(&commit.decorations);
-                    let mut labels = labels
+                    let mut source_offset = decorations_offset;
+                    let mut display_offset = 0;
+                    let mut label_matches = Vec::new();
+                    let mut labels = decorations
                         .split(", ")
                         .enumerate()
                         .map(|(index, label)| {
                             let current = label.starts_with("HEAD -> ")
                                 || (commit.oid == app.snapshot.head
                                     && label == app.snapshot.branch);
+                            let prefix = if index == 0 { "" } else { ", " };
+                            let visible = label.trim_start_matches("HEAD -> ");
+                            let removed = label.chars().count() - visible.chars().count();
+                            label_matches.extend(
+                                matches
+                                    .iter()
+                                    .copied()
+                                    .filter(|position| {
+                                        *position >= source_offset + removed
+                                            && *position < source_offset + label.chars().count()
+                                    })
+                                    .map(|position| {
+                                        display_offset + prefix.chars().count() + position
+                                            - source_offset
+                                            - removed
+                                    }),
+                            );
+                            source_offset += label.chars().count() + 2;
+                            display_offset += prefix.chars().count() + visible.chars().count();
                             Span::styled(
-                                format!(
-                                    "{}{}",
-                                    if index == 0 { "" } else { ", " },
-                                    label.trim_start_matches("HEAD -> ")
-                                ),
+                                format!("{prefix}{visible}"),
                                 Style::default().fg(ACCENT).add_modifier(if current {
                                     Modifier::BOLD
                                 } else {
@@ -706,15 +824,25 @@ fn draw_graph(frame: &mut Frame, area: Rect, app: &mut App) {
                         })
                         .collect::<Vec<_>>();
                     spans.push(Span::styled("[", Style::default().fg(ACCENT)));
-                    spans.append(&mut fit_spans(std::mem::take(&mut labels), budget - 3));
+                    let fitted = fit_spans(std::mem::take(&mut labels), budget - 3);
+                    let retained = fitted
+                        .iter()
+                        .map(|span| span.content.chars().count())
+                        .sum::<usize>()
+                        .saturating_sub(usize::from(
+                            fitted
+                                .last()
+                                .is_some_and(|span| span.content.ends_with('…')),
+                        ));
+                    label_matches.retain(|index| *index < retained);
+                    spans.extend(highlighted_spans(fitted, &label_matches));
                     spans.push(Span::styled("] ", Style::default().fg(ACCENT)));
                 }
             }
-            spans.push(Span::styled(
-                elide(
-                    &clean(&commit.subject),
-                    left_width.saturating_sub(spans.iter().map(Span::width).sum()),
-                ),
+            spans.extend(highlighted_elide(
+                &subject,
+                left_width.saturating_sub(spans.iter().map(Span::width).sum()),
+                &subject_matches,
                 Style::default().fg(Color::White),
             ));
             let used: usize = spans.iter().map(Span::width).sum();
@@ -752,7 +880,12 @@ fn draw_graph(frame: &mut Frame, area: Rect, app: &mut App) {
     );
 }
 
-fn file_line(row: &Row, app: &App) -> Line<'static> {
+fn file_line(
+    row: &Row,
+    app: &App,
+    query: &crate::fuzzy::Query,
+    match_path: &std::path::Path,
+) -> Line<'static> {
     let color = if app.file_panel() == Panel::HeadFiles {
         Color::White
     } else if row.ignored || !row.changed {
@@ -777,7 +910,7 @@ fn file_line(row: &Row, app: &App) -> Line<'static> {
     } else {
         " "
     };
-    Line::from(vec![
+    let mut spans = vec![
         Span::styled(
             index.to_string(),
             Style::default().fg(if index != ' ' && index != '?' && index != '!' {
@@ -795,8 +928,34 @@ fn file_line(row: &Row, app: &App) -> Line<'static> {
             }),
         ),
         Span::raw(format!(" {}{marker} ", "  ".repeat(row.depth))),
-        Span::styled(clean(&row.label), Style::default().fg(color)),
-    ])
+    ];
+    let label = clean(&row.label);
+    if app.search(app.file_panel()).is_empty() {
+        spans.push(Span::styled(label, Style::default().fg(color)));
+        return Line::from(spans);
+    }
+    let full_path = clean(&match_path.to_string_lossy());
+    let row_path = clean(&row.path.to_string_lossy());
+    let label_offset = if app.config.gui.show_file_tree {
+        row_path
+            .chars()
+            .count()
+            .saturating_sub(label.chars().count())
+    } else {
+        0
+    };
+    let positions: Vec<_> = query
+        .positions(&full_path)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|index| *index >= label_offset && *index < label_offset + label.chars().count())
+        .map(|index| index - label_offset)
+        .collect();
+    spans.extend(highlighted_spans(
+        vec![Span::styled(label, Style::default().fg(color))],
+        &positions,
+    ));
+    Line::from(spans)
 }
 
 fn draw_files(frame: &mut Frame, area: Rect, app: &mut App) {
@@ -822,9 +981,23 @@ fn draw_files(frame: &mut Frame, area: Rect, app: &mut App) {
         Panel::HeadFiles => &app.head_rows,
         _ => &app.commit_rows,
     };
+    let query = crate::fuzzy::Query::new(app.search(panel));
     let items = rows[range.clone()]
         .iter()
-        .map(|row| file_line(row, app))
+        .enumerate()
+        .map(|(index, row)| {
+            let match_path = if row.directory && !app.search(panel).is_empty() {
+                rows[range.start + index + 1..]
+                    .iter()
+                    .take_while(|child| child.depth > row.depth)
+                    .find(|child| !child.directory)
+                    .map(|child| child.path.as_path())
+                    .unwrap_or(&row.path)
+            } else {
+                &row.path
+            };
+            file_line(row, app, &query, match_path)
+        })
         .collect();
     let title = if panel == Panel::HeadFiles {
         format!(
@@ -1194,6 +1367,49 @@ fn draw_modal(frame: &mut Frame, app: &App) {
     };
     let area = frame.area();
     match modal {
+        Modal::Busy { running, requested } => {
+            let rect = centered(area, 88, 14);
+            frame.render_widget(Clear, rect);
+            let inner = rect.inner(ratatui::layout::Margin::new(1, 1));
+            let active = app.busy.is_some();
+            frame.render_widget(
+                block(
+                    if active {
+                        "Command already running"
+                    } else {
+                        "Command finished"
+                    },
+                    true,
+                ),
+                rect,
+            );
+            let parts = Layout::vertical([Constraint::Min(1), Constraint::Length(3)]).split(inner);
+            frame.render_widget(
+                Paragraph::new(format!(
+                    "{}:\n{}\n\nNot started: {}",
+                    if active {
+                        "Another command is still running"
+                    } else {
+                        "The previous command has finished"
+                    },
+                    clean(running),
+                    clean(requested)
+                ))
+                .wrap(Wrap { trim: false }),
+                parts[0],
+            );
+            let guidance = if active {
+                "Wait for it to finish, or Ctrl+c to cancel it.\nYour new command has not been queued.\nEnter / Esc closes this warning."
+            } else {
+                "Your new command has not been queued.\nEnter / Esc closes this warning; then try again."
+            };
+            frame.render_widget(
+                Paragraph::new(guidance)
+                    .style(Style::default().fg(Color::Yellow))
+                    .wrap(Wrap { trim: false }),
+                parts[1],
+            );
+        }
         Modal::Input { title, text, .. } => {
             let rect = centered(area, 88, 7);
             frame.render_widget(Clear, rect);
@@ -1213,9 +1429,22 @@ fn draw_modal(frame: &mut Frame, app: &App) {
             ));
         }
         Modal::Confirm { title, .. } => {
-            let rect = centered(area, 88, 9);
+            let body = Paragraph::new(format!("{title}\n\nThis operation changes the repository."))
+                .wrap(Wrap { trim: false });
+            let width = area.width.saturating_sub(4).min(86);
+            let height = (body.line_count(width) + 6).min(u16::MAX as usize) as u16;
+            let rect = centered(area, 88, height);
             frame.render_widget(Clear, rect);
-            frame.render_widget(Paragraph::new(format!("{title}\n\nThis operation changes the repository.\n\ny / Enter confirm · n / Esc cancel")).wrap(Wrap { trim: false }).block(block("Confirm", true)), rect);
+            frame.render_widget(block("Confirm", true), rect);
+            let parts = Layout::vertical([Constraint::Min(1), Constraint::Length(2)])
+                .split(rect.inner(ratatui::layout::Margin::new(1, 1)));
+            frame.render_widget(body, parts[0]);
+            frame.render_widget(
+                Paragraph::new("y / Enter confirm · n / Esc cancel")
+                    .style(Style::default().fg(Color::Yellow))
+                    .wrap(Wrap { trim: false }),
+                parts[1],
+            );
         }
         Modal::Menu {
             title,
@@ -1368,4 +1597,4 @@ pub fn hit_test(area: Rect, app: &App, x: u16, y: u16) -> Option<(Panel, usize)>
     None
 }
 
-pub const HELP: &str = "Numbered panes\n  1 Repositories · 2 Local branches · 3 Remote branches · 4 Stashes\n  5 Commit graph · 6 Commit details · 7 Changed files · 0 Diff · 8 Output\n  Number keys focus panes · Tab/Shift+Tab cycle · + zoom focused pane\n  O opens context actions; o also works where it is not the file opener.\n  Choose with arrows; Enter/shortcut runs; descriptions appear below.\n  j/k or arrows move · Home/End/PageUp/PageDown scroll · / search\n  Esc returns · q quits · Ctrl+r recent repos · @ show/hide output\n\nBranches and graph\n  Space toggles a branch in the graph; this does not check it out.\n  Enabled local and remote branches are combined with shared ancestors.\n  Slash-delimited branches form nested groups: feature/user/login.\n  Enter toggles groups; Left/Right navigates; Space toggles a whole group.\n  Enter checks out the selected branch · * marks the current branch.\n  Branch visibility is saved separately for each repository.\n  j/k in the graph updates details and files without moving focus.\n  Shift+Up/Down or PageUp/PageDown moves by a visible page of commits.\n  The right edge shows committer initials/date; long subjects end in ….\n  Working tree / Index appears directly above the active branch tip.\n  Enter in graph focuses files · Enter on a file opens its diff full screen; Esc returns to files.\n  [ / ] in local branches switches branches/tags/worktrees.\n  [ / ] switches commits/reflog · . loads 1,000 more commits.\n  The active branch is bold; AHEAD/BEHIND compares its known upstream.\n  Older commits load automatically near the end; + means more remain.\n  G builds Git's acceleration cache for large repositories.\n\nFile tabs and search\n  [ / ] in pane 7 switches Changes / HEAD tree.\n  Changes follows the hovered commit; HEAD tree shows committed HEAD files.\n  / or Ctrl+f starts live fuzzy search; arrows select; Enter keeps; Esc cancels.\n  Space-separated terms combine; 'term is literal; !term excludes; smart case.\n  Commit results are ranked and search loaded history only.\n\nWorking files\n  Space stage/unstage · a stage all · c commit · C editor · A amend\n  D reset menu (including submodule stashing/reset) · d discard\n  s stash with untracked · S stash options · i ignore · I show ignored\n  Grave key tree/flat · - collapse · = expand · v mark · Shift+arrows range\n  Ctrl+s file/history filters; turn off changed-only to browse clean files\n  F file history follows renames · e editor · o opener · y copy path\n  Ctrl+t configured difftool · Alt+m mergetool · M conflict menu\n\nDiff\n  ~ saves automatic previews on/off · 0 explicitly opens the full diff\n  Automatic file limit 2 MiB and output limit 512 KiB (configurable)\n  Up/down scroll within hunks · PageUp/PageDown scroll a screen\n  Left/right jump hunks · a hunk/line mode · Space stage/unstage\n  d discard selected change · [ / ] staged/unstaged · { / } context\n  H/L horizontal scroll · Ctrl+w whitespace · n/N next file or search match\n\nHistory and operations\n  Graph: g reset · t revert · C copy · V cherry-pick · F fixup · T tag\n  i interactive rebase · r/R reword/rebase editor · b bisect · y copy hash\n  Branches: n new · c checkout by name · R rename · M merge · r rebase\n  F force checkout · T tag · u upstream · w worktree · d delete\n  Stashes: Space apply · g pop · d drop · Enter diff · s save\n  p pull · P push · R refresh · m continue/abort/skip operation\n  : captured command with live output · ! interactive terminal command\n  Ctrl+c cancels running command · End follows output\n";
+pub const HELP: &str = "Numbered panes\n  1 Repositories · 2 Local branches · 3 Remote branches · 4 Stashes\n  5 Commit graph · 6 Commit details · 7 Changed files · 0 Diff · 8 Output\n  Number keys focus panes · Tab/Shift+Tab cycle · + zoom focused pane\n  O opens context actions; o also works where it is not the file opener.\n  Choose with arrows; Enter/shortcut runs; descriptions appear below.\n  j/k or arrows move · Home/End/PageUp/PageDown scroll · / search\n  Esc returns · q quits · Ctrl+r recent repos · @ show/hide output\n\nBranches and graph\n  Space toggles a branch in the graph; this does not check it out.\n  Enabled local and remote branches are combined with shared ancestors.\n  Slash-delimited branches form nested groups: feature/user/login.\n  Enter toggles groups; Left/Right navigates; Space toggles a whole group.\n  Enter checks out the selected branch · * marks the current branch.\n  Branch visibility is saved separately for each repository.\n  j/k in the graph updates details and files without moving focus.\n  Shift+Up/Down or PageUp/PageDown moves by a visible page of commits.\n  The right edge shows committer initials/date; long subjects end in ….\n  Working tree / Index appears directly above the active branch tip.\n  Enter in graph focuses files · Enter on a file opens its diff full screen; Esc returns to files.\n  [ / ] in local branches switches branches/tags/worktrees.\n  [ / ] switches commits/reflog · . loads another page of commits.\n  The active branch is bold; AHEAD/BEHIND compares its known upstream.\n  L or actions → Loaded commits sets the saved initial/page size.\n  Older commits load automatically near the end; + means more remain.\n  G builds Git's acceleration cache for large repositories.\n\nFile tabs and search\n  [ / ] in pane 7 switches Changes / HEAD tree.\n  Changes follows the hovered commit; HEAD tree shows committed HEAD files.\n  / or Ctrl+f starts live fuzzy search; arrows select; Enter keeps; Esc cancels.\n  Space-separated terms combine; 'term is literal; !term excludes; smart case.\n  Commit results are ranked and search loaded history only.\n\nWorking files\n  Space stage/unstage · a stage all · c commit · C editor · A amend\n  D reset menu (including submodule stashing/reset) · d discard\n  s stash with untracked · S stash options · i ignore · I show ignored\n  Grave key tree/flat · - collapse · = expand · v mark · Shift+arrows range\n  Ctrl+s file/history filters; turn off changed-only to browse clean files\n  F file history follows renames · e editor · o opener · y copy path\n  Ctrl+t configured difftool · Alt+m mergetool · M conflict menu\n\nDiff\n  ~ saves automatic previews on/off · 0 explicitly opens the full diff\n  Automatic file limit 2 MiB and output limit 512 KiB (configurable)\n  Up/down scroll within hunks · PageUp/PageDown scroll a screen\n  Left/right jump hunks · a hunk/line mode · Space stage/unstage\n  d discard selected change · [ / ] staged/unstaged · { / } context\n  H/L horizontal scroll · Ctrl+w whitespace · n/N next file or search match\n\nHistory and operations\n  Graph: g reset · t revert · C copy · V cherry-pick · F fixup · T tag\n  i interactive rebase · r/R reword/rebase editor · b bisect · y copy hash\n  Branches: n new · c checkout by name · R rename · M merge · r rebase\n  F force checkout · T tag · u upstream · w worktree · d delete\n  Stashes: Space apply · g pop · d drop · Enter diff · s save\n  p pull options · P push options · R refresh · m continue/abort/skip operation\n  : captured command with live output · ! interactive terminal command\n  A blocked command opens a popup; it is not queued.\n  Ctrl+c cancels even from the popup · End follows output\n";
