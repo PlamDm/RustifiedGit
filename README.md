@@ -1,47 +1,42 @@
 # RustifiedGit
 
-A keyboard-driven terminal Git client written in Rust. It provides a commit
-graph, repository and branch navigation, file and diff inspection, and common
-Git operations in one interface. Git must be available on `PATH`.
+A keyboard-driven terminal Git client for browsing commits, inspecting diffs,
+and managing branches and changes.
 
-## Download
+## Quick start
 
-Choose an asset from [GitHub Releases](https://github.com/PlamDm/RustifiedGit/releases/latest).
-Git must be installed and available on `PATH`.
+Install Git if needed and check that `git --version` works in your terminal.
+Then download the build for your platform.
 
-| Platform | Asset |
+| Platform | Download |
 | --- | --- |
-| Windows x64 | `rustifiedgit.exe` |
-| macOS Apple Silicon | `rustifiedgit-macos-arm64.tar.gz` |
-| macOS Intel | `rustifiedgit-macos-x86_64.tar.gz` |
-| Linux x64 (Ubuntu 22.04 or equivalent with glibc 2.35 or newer) | `rustifiedgit-linux-x86_64.tar.gz` |
+| Windows x64 | [rustifiedgit.exe](https://github.com/PlamDm/RustifiedGit/releases/latest/download/rustifiedgit.exe) |
+| macOS Apple Silicon | [macOS arm64 archive](https://github.com/PlamDm/RustifiedGit/releases/latest/download/rustifiedgit-macos-arm64.tar.gz) |
+| macOS Intel | [macOS x64 archive](https://github.com/PlamDm/RustifiedGit/releases/latest/download/rustifiedgit-macos-x86_64.tar.gz) |
+| Linux x64 (glibc 2.35+) | [Linux x64 archive](https://github.com/PlamDm/RustifiedGit/releases/latest/download/rustifiedgit-linux-x86_64.tar.gz) |
 
-On Windows, open PowerShell in the download folder and run
-`.\rustifiedgit.exe -p "C:\path\to\repository"`. On macOS or Linux, extract
-the archive and run `./rustifiedgit -p /path/to/repository` in Terminal.
-Omit `-p` to open the current directory. Each release includes SHA-256 checksums.
+Extract the archive on macOS or Linux. Open a terminal in the folder containing
+the executable and replace the example path with the path to your Git repository.
 
-## Clone and build
+**Windows (PowerShell)**
 
-```sh
-git clone https://github.com/PlamDm/RustifiedGit.git
-cd RustifiedGit
-cargo build --release --locked
-./target/release/rustifiedgit -p /path/to/repository
+```powershell
+.\rustifiedgit.exe -p "C:\path\to\repo"
 ```
 
-The repository pins Rust 1.88.0 through `rust-toolchain.toml`. Rustup selects it
-for this project without changing your default toolchain. The optimized release
-profile enables thin LTO and a single code-generation unit.
-
-To open the Rust project itself:
+**macOS and Linux**
 
 ```sh
-./target/release/rustifiedgit -p .
+./rustifiedgit -p "/path/to/repo"
 ```
 
-The executable is named `rustifiedgit` on macOS and Linux and `rustifiedgit.exe`
-on Windows.
+Omit `-p` to open the current directory.
+
+- Press `5` to focus the commit graph and use the arrow keys to browse commits.
+- Press `7` to focus the changed files. Select a file and press `Enter` to inspect it.
+- Press `?` and start typing to search shortcuts, or press `O` for actions in the current pane.
+
+Release notes and SHA-256 checksums are on [GitHub Releases](https://github.com/PlamDm/RustifiedGit/releases/latest).
 
 ## Numbered panes
 
@@ -297,6 +292,17 @@ and write operations only run after an action or an enabled scheduled fetch;
 repository reads set `GIT_OPTIONAL_LOCKS=0`.
 
 ## Development and verification
+
+Clone the repository and run it from source with [Rustup](https://rustup.rs/).
+The repository pins Rust 1.88.0.
+
+```sh
+git clone https://github.com/PlamDm/RustifiedGit.git
+cd RustifiedGit
+cargo run --release --locked
+```
+
+To check the source and build a release executable:
 
 ```sh
 cargo fmt --all -- --check
