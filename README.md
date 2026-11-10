@@ -1,19 +1,15 @@
 # RustifiedGit
 
-A native Rust terminal Git client, ported from the `pd_development` branch of
-[PlamDm/pd_lazygit](https://github.com/PlamDm/pd_lazygit), revision
-`d9cd093e7af6fa0c79c22b62a9113928c8d00d16`.
-
-The source is independent of the Go checkout. The executable needs Git on PATH;
-it does not call the Go application. [PORTING.md](PORTING.md) records exactly
-which workflows have native implementations and which compatibility work remains.
+A keyboard-driven terminal Git client written in Rust. It provides a commit
+graph, repository and branch navigation, file and diff inspection, and common
+Git operations in one interface. Git must be available on `PATH`.
 
 ## Run
 
 ```sh
 cd ~/Playground/rustifiedgit
 cargo build --release --locked
-./target/release/rustifiedgit -p ~/Playground/pd_lazygit
+./target/release/rustifiedgit -p /path/to/repository
 ```
 
 The repository pins Rust 1.88.0 through `rust-toolchain.toml`. Rustup selects it
@@ -26,7 +22,7 @@ To open the Rust project itself:
 ./target/release/rustifiedgit -p .
 ```
 
-The command is `rustifiedgit`, so your installed Go `lazygit` stays available.
+The executable is named `rustifiedgit`.
 
 ## Numbered panes
 
@@ -142,7 +138,7 @@ changing commits, branches, the index or working files. The equivalent command i
 git -C /path/to/repo commit-graph write --reachable
 ```
 
-## Your fork's workflows
+## Repository workflows
 
 - The full repository file view includes unchanged tracked files, dimmed with their clean directories.
   `I` includes ignored files. Staging and discarding exclude ignored files.
@@ -183,24 +179,22 @@ credential helpers and SSH agents continue to work through Git.
 
 ## Configuration
 
-RustifiedGit preferences default to `~/.config/rustifiedgit` (`%APPDATA%` on Windows,
-or `$XDG_CONFIG_HOME` when set). Nothing is written to the Go configuration
-unless you explicitly select its directory. Existing settings under
-`pd-lazygit-rust` are reused automatically until a `rustifiedgit` config
-directory exists.
+RustifiedGit preferences default to `~/.config/rustifiedgit` (`%APPDATA%` on
+Windows, or `$XDG_CONFIG_HOME` when set). Preferences from an earlier
+RustifiedGit config directory are reused automatically until the new directory
+exists.
 
-Existing LazyGit YAML can be selected with:
+An alternate YAML configuration directory or file can be selected with:
 
 ```sh
-./target/release/rustifiedgit --use-config-dir ~/Playground/config/lazygit
+./target/release/rustifiedgit --use-config-dir ~/.config/rustifiedgit
 ./target/release/rustifiedgit --use-config-file ./config.yml,./local.yml
 ./target/release/rustifiedgit --validate-config --use-config-file ./config.yml
 ```
 
-Settings are merged in order. This version supports the fork's file/preview
-settings, refresh settings, common action key remaps, editor/open commands,
-and custom commands with selected-value templates and input prompts. It does
-not interpret every upstream LazyGit YAML setting; see the compatibility table.
+Settings are merged in order. Configuration supports file and preview options,
+refresh settings, action key remaps, editor/open commands, and custom commands
+with selected-value templates and input prompts.
 
 ```yaml
 gui:
@@ -225,10 +219,10 @@ keybinding:
     toggleDiffPreview: '~'
 ```
 
-`rust-state.json` stores toggles, per-repository visible refs and recent repositories. Existing `config.yml`
-and Go `state.yml` files are never overwritten. Destructive Git actions require
-confirmation in the UI. Network and write operations only run after an action
-or an enabled scheduled fetch; repository reads set `GIT_OPTIONAL_LOCKS=0`.
+`rust-state.json` stores toggles, per-repository visible refs and recent
+repositories. Destructive Git actions require confirmation in the UI. Network
+and write operations only run after an action or an enabled scheduled fetch;
+repository reads set `GIT_OPTIONAL_LOCKS=0`.
 
 ## Development and verification
 
@@ -251,13 +245,10 @@ For read-only inspection and reproducible performance measurements:
 ./target/release/rustifiedgit --snapshot -p /path/to/repo
 ./target/release/rustifiedgit --render 120x40 -p /path/to/repo
 ./target/release/rustifiedgit --benchmark --iterations 20 -p /path/to/repo
-python3 scripts/compare_startup.py --go ./target/benchmark-go-lazygit
 ```
 
-The startup comparison requires an optimized build of the original fork; don't
-use a Go build with `-gcflags='all=-N -l'` as a performance baseline. Repository
-size, filesystem cache, Git configuration, hooks and authentication affect
-results. See [PERFORMANCE.md](PERFORMANCE.md) for recorded measurements.
+Repository size, filesystem cache, Git configuration, hooks and authentication
+affect performance measurements.
 
 ## Architecture
 
@@ -272,9 +263,9 @@ results. See [PERFORMANCE.md](PERFORMANCE.md) for recorded measurements.
 - `patch.rs`: complete hunk and selected-line patches applied by `git apply`.
 - `app.rs`: state transitions, keybindings, dialogs and command dispatch.
 - `ui.rs`: Ratatui rendering; only visible file rows and diff lines are styled.
-- `config.rs`: YAML compatibility and separate persisted Rust state.
+- `config.rs`: YAML configuration, preferences and saved application state.
 
-The port retains the original MIT notice in [LICENSE](LICENSE). Technical
+RustifiedGit is licensed under MIT; see [LICENSE](LICENSE). Technical
 references: [Ratatui 0.29](https://docs.rs/ratatui/0.29.0/ratatui/),
 [Git porcelain status](https://git-scm.com/docs/git-status),
 [Git patch format](https://git-scm.com/docs/git-diff).
