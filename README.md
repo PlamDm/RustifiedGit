@@ -156,6 +156,10 @@ git -C /path/to/repo commit-graph write --reachable
   Invoking another operation opens a popup naming the active and blocked commands;
   the new command is not queued. Enter/Esc dismisses it; Ctrl+c cancels the active
   command even while the popup is open. The log also records each command step.
+  Branch switches report Git's file-update progress here. Transfer progress from
+  Git and Git LFS stays visible while it updates, including counts and speeds
+  when the command provides them. The output pane shows a running indicator
+  during phases where the command has no progress details to report.
 
 `p` opens pull options: fast-forward only, merge, rebase, rebase with autostash,
 fetch only, or overwrite the local branch with its fetched upstream. Overwrite

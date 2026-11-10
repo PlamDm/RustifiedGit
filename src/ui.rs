@@ -11,11 +11,15 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
-use std::borrow::Cow;
+use std::{borrow::Cow, time::Duration};
 
 const ACCENT: Color = Color::Cyan;
 const MUTED: Color = Color::DarkGray;
 const SELECTED: Color = Color::Rgb(35, 55, 65);
+
+fn activity_spinner(elapsed: Duration) -> char {
+    ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧'][elapsed.as_millis() as usize / 100 % 8]
+}
 
 pub struct Areas {
     pub header: Rect,
@@ -1199,8 +1203,22 @@ fn draw_output(frame: &mut Frame, area: Rect, app: &mut App) {
             )
         })
         .collect();
+    let title = if let Some((_, started, label)) = &app.busy {
+        format!(
+            "8 Command output · {} {} · {}s · Ctrl+c cancel",
+            activity_spinner(started.elapsed()),
+            if label.starts_with("git switch ") {
+                "switching"
+            } else {
+                "running"
+            },
+            started.elapsed().as_secs(),
+        )
+    } else {
+        "8 Command output".into()
+    };
     frame.render_widget(
-        Paragraph::new(lines).block(block("8 Command output", app.focus == Panel::Output)),
+        Paragraph::new(lines).block(block(title, app.focus == Panel::Output)),
         area,
     );
 }
@@ -1240,8 +1258,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let activity = if let Some((_, started, label)) = &app.busy {
         format!(
             " {} {}s · {}",
-            ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"]
-                [started.elapsed().as_millis() as usize / 100 % 8],
+            activity_spinner(started.elapsed()),
             started.elapsed().as_secs(),
             clean(label)
         )
@@ -1271,7 +1288,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Paragraph::new(vec![
             Line::from(vec![
                 Span::styled(
-                    " PD LAZYGIT ",
+                    " RUSTIFIEDGIT ",
                     Style::default()
                         .bg(ACCENT)
                         .fg(Color::Black)

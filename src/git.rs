@@ -64,6 +64,17 @@ pub struct Operation {
 
 impl Operation {
     pub fn git(args: impl IntoIterator<Item = impl Into<OsString>>) -> Self {
+        let mut args: Vec<OsString> = args.into_iter().map(Into::into).collect();
+        // Checkout progress normally requires a terminal. Managed commands use
+        // pipes, including every local/remote/tag/create/previous-branch switch.
+        if args.first().is_some_and(|arg| arg == "switch")
+            && !args
+                .iter()
+                .take_while(|arg| *arg != "--")
+                .any(|arg| arg == "--progress" || arg == "--no-progress")
+        {
+            args.insert(1, "--progress".into());
+        }
         let command = CommandSpec::git(args);
         Self {
             label: command.label.clone(),

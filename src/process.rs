@@ -193,6 +193,10 @@ pub fn run(
 ) -> Result<Output> {
     cancel.check()?;
     let mut cmd = spec.command(root);
+    if stream.is_some() && spec.program == OsStr::new("git") {
+        // LFS otherwise suppresses transfer updates when Git's output is piped.
+        cmd.env("GIT_LFS_FORCE_PROGRESS", "1");
+    }
     cmd.stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .stdin(if spec.stdin.is_some() {

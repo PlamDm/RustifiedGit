@@ -165,6 +165,7 @@ pub struct App {
     pub show_staged: bool,
     pub output: VecDeque<String>,
     output_pending: String,
+    output_overwrite: bool,
     pub output_scroll: usize,
     pub output_follow: bool,
     pub modal: Option<Modal>,
@@ -292,6 +293,7 @@ impl App {
             show_staged: false,
             output: VecDeque::new(),
             output_pending: String::new(),
+            output_overwrite: false,
             output_scroll: 0,
             output_follow: true,
             modal: None,
@@ -1332,20 +1334,26 @@ impl App {
     }
 
     fn append_output(&mut self, text: &str) {
-        self.output_pending.push_str(text);
-        while let Some(index) = self.output_pending.find('\n') {
-            let line: String = self.output_pending.drain(..=index).collect();
-            self.output.push_back(
-                strip_ansi(line.trim_end_matches('\n'))
-                    .split('\r')
-                    .next_back()
-                    .unwrap_or_default()
-                    .to_owned(),
-            );
-        }
-        if self.output_pending.len() > 64 * 1024 {
-            let line = std::mem::take(&mut self.output_pending);
-            self.output.push_back(strip_ansi(&line));
+        for character in text.chars() {
+            match character {
+                '\r' => self.output_overwrite = true,
+                '\n' => {
+                    self.output
+                        .push_back(strip_ansi(&std::mem::take(&mut self.output_pending)));
+                    self.output_overwrite = false;
+                }
+                _ => {
+                    if self.output_overwrite {
+                        self.output_pending.clear();
+                        self.output_overwrite = false;
+                    }
+                    self.output_pending.push(character);
+                    if self.output_pending.len() > 64 * 1024 {
+                        self.output
+                            .push_back(strip_ansi(&std::mem::take(&mut self.output_pending)));
+                    }
+                }
+            }
         }
         while self.output.len() > self.config.gui.command_log_size {
             self.output.pop_front();
@@ -1357,6 +1365,7 @@ impl App {
             self.output
                 .push_back(strip_ansi(&std::mem::take(&mut self.output_pending)));
         }
+        self.output_overwrite = false;
     }
     pub fn output_tail(&self) -> &str {
         &self.output_pending
