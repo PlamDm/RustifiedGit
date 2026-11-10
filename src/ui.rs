@@ -439,48 +439,43 @@ struct GraphLine<'a> {
     logical: Option<usize>,
 }
 
-fn graph_lines(app: &App) -> Vec<GraphLine<'_>> {
-    let mut rows = Vec::new();
+fn graph_line(app: &App, row: crate::history::GraphRow) -> GraphLine<'_> {
+    use crate::history::GraphRow;
     let searching = !app.search(Panel::Commits).is_empty();
-    let worktree_index = app.working_tree_graph_index();
-    for (logical, index) in app.filtered_commits().into_iter().enumerate() {
-        let commit = &app.snapshot.commits[index];
-        if !searching {
-            rows.extend(commit.graph_before.iter().map(|prefix| GraphLine {
-                prefix: Cow::Borrowed(prefix),
-                commit_index: None,
-                logical: None,
-            }));
-        }
-        if logical == worktree_index {
-            rows.push(GraphLine {
-                prefix: if searching || commit.graph_prefix.is_empty() {
-                    Cow::Borrowed("◎ ")
-                } else {
-                    Cow::Owned(commit.graph_prefix.replace('*', "◎"))
-                },
-                commit_index: None,
-                logical: Some(worktree_index),
-            });
-        }
-        rows.push(GraphLine {
-            prefix: if searching || commit.graph_prefix.is_empty() {
-                Cow::Borrowed("* ")
-            } else {
-                Cow::Borrowed(&commit.graph_prefix)
-            },
-            commit_index: Some(index),
-            logical: Some(logical + usize::from(logical >= worktree_index)),
-        });
-    }
-    if rows.is_empty() {
-        rows.push(GraphLine {
-            prefix: Cow::Borrowed("◎ "),
+    match row {
+        GraphRow::WorkingTree {
+            commit_index,
+            logical,
+        } => GraphLine {
+            prefix: commit_index
+                .and_then(|index| app.snapshot.commits.get(index))
+                .filter(|commit| !searching && !commit.graph_prefix.is_empty())
+                .map(|commit| Cow::Owned(commit.graph_prefix.replace('*', "◎")))
+                .unwrap_or(Cow::Borrowed("◎ ")),
             commit_index: None,
-            logical: Some(0),
-        });
+            logical: Some(logical),
+        },
+        GraphRow::Commit {
+            commit_index,
+            logical,
+        } => {
+            let commit = &app.snapshot.commits[commit_index];
+            GraphLine {
+                prefix: if searching || commit.graph_prefix.is_empty() {
+                    Cow::Borrowed("* ")
+                } else {
+                    Cow::Borrowed(&commit.graph_prefix)
+                },
+                commit_index: Some(commit_index),
+                logical: Some(logical),
+            }
+        }
+        GraphRow::Connector { commit_index, line } => GraphLine {
+            prefix: Cow::Borrowed(&app.snapshot.commits[commit_index].graph_before[line]),
+            commit_index: None,
+            logical: None,
+        },
     }
-    rows
 }
 
 fn graph_spans(text: &str) -> Vec<Span<'static>> {
@@ -671,12 +666,12 @@ fn draw_graph(frame: &mut Frame, area: Rect, app: &mut App) {
         return;
     }
     let selected_logical = app.selected_graph_row();
-    let rows = graph_lines(app);
-    let selected_visual = rows
-        .iter()
-        .position(|row| row.logical == Some(selected_logical))
+    let index = app.graph_index();
+    let working_tree_index = app.working_tree_graph_index();
+    let selected_visual = index
+        .visual_for_logical(selected_logical, working_tree_index)
         .unwrap_or(0);
-    let total = rows.len();
+    let total = index.len();
     // Store positions independently of borrowed graph text before mutating viewport state.
     let height = area.height.saturating_sub(2).max(1) as usize;
     let mut offset = app.scrolls[3].min(total.saturating_sub(height));
@@ -689,7 +684,8 @@ fn draw_graph(frame: &mut Frame, area: Rect, app: &mut App) {
     let mut items = Vec::with_capacity(height);
     let content_width = area.width.saturating_sub(4) as usize;
     let query = crate::fuzzy::Query::new(app.search(Panel::Commits));
-    for row in rows.iter().skip(offset).take(height) {
+    for visual in offset..offset.saturating_add(height).min(total) {
+        let row = graph_line(app, index.row(visual, working_tree_index).unwrap());
         let mut spans = graph_spans(&row.prefix);
         if row.logical.is_some() && row.commit_index.is_none() {
             let changed = app
@@ -869,6 +865,11 @@ fn draw_graph(frame: &mut Frame, area: Rect, app: &mut App) {
             if app.history_exhausted { "" } else { "+" },
             app.history_elapsed_ms,
         )
+    };
+    let title = if app.history_error.is_some() {
+        format!("{title} · paused · L options")
+    } else {
+        title
     };
     render_list(
         frame,
@@ -1361,7 +1362,7 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
     )
 }
 
-fn draw_modal(frame: &mut Frame, app: &App) {
+fn draw_modal(frame: &mut Frame, app: &mut App) {
     let Some(modal) = &app.modal else {
         return;
     };
@@ -1542,13 +1543,38 @@ fn draw_modal(frame: &mut Frame, app: &App) {
             );
         }
         Modal::Message(message) => {
-            let rect = centered(area, 96, 12);
+            let paragraph = Paragraph::new(message.as_str()).wrap(Wrap { trim: false });
+            let width = area.width.saturating_sub(2).min(96);
+            let lines = paragraph.line_count(width.saturating_sub(2));
+            let rect = centered(area, 96, lines.saturating_add(4).clamp(7, 24) as u16);
             frame.render_widget(Clear, rect);
+            let regions = Layout::vertical([Constraint::Min(1), Constraint::Length(2)])
+                .split(rect.inner(ratatui::layout::Margin::new(1, 1)));
+            app.message_page_size = regions[0].height as usize;
+            app.message_max_scroll = lines
+                .saturating_sub(app.message_page_size)
+                .min(u16::MAX as usize);
+            app.message_scroll = app.message_scroll.min(app.message_max_scroll);
+            let title = if app.message_max_scroll > 0 {
+                format!(
+                    "Message · lines {}–{} of {lines}",
+                    app.message_scroll + 1,
+                    (app.message_scroll + app.message_page_size).min(lines)
+                )
+            } else {
+                "Message".into()
+            };
+            frame.render_widget(block(title, true), rect);
+            frame.render_widget(paragraph.scroll((app.message_scroll as u16, 0)), regions[0]);
             frame.render_widget(
-                Paragraph::new(format!("{message}\n\nEnter / Esc close"))
-                    .wrap(Wrap { trim: false })
-                    .block(block("Message", true)),
-                rect,
+                Paragraph::new(if app.message_max_scroll > 0 {
+                    "↑/↓ or PgUp/PgDn scroll · Enter / Esc close"
+                } else {
+                    "Enter / Esc close"
+                })
+                .style(Style::default().fg(Color::Yellow))
+                .wrap(Wrap { trim: false }),
+                regions[1],
             );
         }
     }
@@ -1578,10 +1604,10 @@ pub fn hit_test(area: Rect, app: &App, x: u16, y: u16) -> Option<(Panel, usize)>
         }
         let index = y.saturating_sub(rect.y + 1) as usize;
         if panel == Panel::Commits {
-            let rows = graph_lines(app);
+            let rows = app.graph_index();
             return rows
-                .get(app.scrolls[3] + index)
-                .and_then(|row| row.logical)
+                .row(app.scrolls[3] + index, app.working_tree_graph_index())
+                .and_then(crate::history::GraphRow::logical)
                 .map(|logical| (panel, logical));
         }
         return Some((

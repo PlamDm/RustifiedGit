@@ -129,7 +129,7 @@ def eventually(check, timeout=5, pump=None):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("binary", nargs="?", type=Path, default=Path(__file__).resolve().parents[1] / "target/release/pd-lazygit")
+    parser.add_argument("binary", nargs="?", type=Path, default=Path(__file__).resolve().parents[1] / "target/release/rustifiedgit")
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="pd-rust-smoke-") as temporary:
         root = Path(temporary) / "repo"

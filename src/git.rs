@@ -22,6 +22,8 @@ use std::{
 
 const READ_LIMIT: usize = 64 * 1024 * 1024;
 const READ_TIMEOUT: Duration = Duration::from_secs(60);
+pub const HISTORY_READ_LIMIT: usize = 512 * 1024 * 1024;
+const HISTORY_READ_TIMEOUT: Duration = Duration::from_secs(180);
 pub const HISTORY_PAGE_SIZE: usize = 1000;
 type IndexStamp = (Option<SystemTime>, u64);
 type TrackedCache = Arc<Mutex<Option<(IndexStamp, Vec<PathBuf>)>>>;
@@ -98,6 +100,33 @@ impl Operation {
 
 fn without_newline(bytes: &[u8]) -> &[u8] {
     bytes.strip_suffix(b"\n").unwrap_or(bytes)
+}
+
+fn history_output_error(output: &Output, requested: usize) -> Option<anyhow::Error> {
+    // Overflow terminates Git, so its exit code is also unsuccessful and stderr
+    // is often empty. Report the useful cause before examining that exit code.
+    if output.truncated {
+        return Some(anyhow::anyhow!(
+            "Commit history exceeded the 512 MiB history read limit while loading up to {requested} commits. Press L in the graph to choose a smaller initial/page size, or select fewer branches."
+        ));
+    }
+    if output.code == 0 {
+        return None;
+    }
+    let details = String::from_utf8_lossy(if output.stderr.is_empty() {
+        &output.stdout
+    } else {
+        &output.stderr
+    });
+    let details = details.trim();
+    Some(if details.is_empty() {
+        anyhow::anyhow!(
+            "Git could not load up to {requested} commits (exit code {}); no error details were returned.",
+            output.code
+        )
+    } else {
+        anyhow::anyhow!("Git could not load up to {requested} commits: {details}")
+    })
 }
 
 impl Repository {
@@ -447,8 +476,24 @@ impl Repository {
                 command.stdin = Some(format!("{}\n", references.join("\n")).into_bytes());
             }
         }
-        let output = process::run(&self.root, &command, cancel, READ_LIMIT, None, READ_TIMEOUT)?;
-        if output.code != 0 {
+        let requested = if options.commit_limit == 0 {
+            HISTORY_PAGE_SIZE
+        } else {
+            options.commit_limit
+        };
+        let output = process::run(
+            &self.root,
+            &command,
+            cancel,
+            HISTORY_READ_LIMIT,
+            None,
+            HISTORY_READ_TIMEOUT,
+        )
+        .with_context(|| format!("Loading up to {requested} commits failed"))?;
+        if let Some(error) = history_output_error(&output, requested) {
+            if output.truncated {
+                return Err(error);
+            }
             let head = process::run(
                 &self.root,
                 &CommandSpec::git(["rev-parse", "--verify", "HEAD"]),
@@ -460,13 +505,17 @@ impl Repository {
             if head.code != 0 {
                 return Ok(Vec::new());
             }
-            output.success()?;
-            unreachable!();
+            return Err(error);
         }
-        if output.truncated {
-            bail!("Commit list exceeded 64 MiB");
+        let mut commits = Vec::new();
+        for (index, commit) in commit_records(&output.stdout).enumerate() {
+            if index % 1024 == 0 {
+                cancel.check()?;
+            }
+            commits.push(commit);
         }
-        Ok(parse_commits(&output.stdout))
+        cancel.check()?;
+        Ok(commits)
     }
 
     pub fn stashes(&self, cancel: &Cancellation) -> Result<Vec<Stash>> {
@@ -1342,41 +1391,111 @@ pub fn parse_status(bytes: &[u8]) -> Result<(Vec<FileEntry>, String)> {
 }
 
 pub fn parse_commits(bytes: &[u8]) -> Vec<Commit> {
-    let fields: Vec<_> = bytes.split(|byte| *byte == 0).collect();
-    let mut commits = Vec::new();
+    commit_records(bytes).collect()
+}
+
+fn commit_records(bytes: &[u8]) -> impl Iterator<Item = Commit> + '_ {
+    // Keep only one record's field slices. A million commits have roughly
+    // eleven million NUL fields, whose collected pointers alone cost 168 MiB.
+    let mut fields = bytes.split(|byte| *byte == 0);
     let mut graph = Vec::new();
-    let mut index = 0;
-    while index < fields.len() {
-        let field = fields[index];
-        if matches!(field.len(), 40 | 64)
-            && field.iter().all(u8::is_ascii_hexdigit)
-            && index + 8 < fields.len()
-        {
-            let text = |offset: usize| String::from_utf8_lossy(fields[index + offset]).into_owned();
-            let graph_prefix = graph.pop().unwrap_or_default();
-            commits.push(Commit {
-                oid: text(0),
-                short: text(1),
-                subject: text(2),
-                author: text(3),
-                date: text(4),
-                committer: text(7),
-                committed_at: text(8),
-                decorations: text(5),
-                parents: text(6).split_whitespace().map(str::to_owned).collect(),
-                graph_prefix,
-                graph_before: std::mem::take(&mut graph),
-            });
-            index += 9;
-        } else {
-            graph.extend(
-                String::from_utf8_lossy(field)
-                    .split('\n')
-                    .filter(|line| !line.is_empty())
-                    .map(str::to_owned),
-            );
-            index += 1;
+    std::iter::from_fn(move || {
+        loop {
+            let field = fields.next()?;
+            if matches!(field.len(), 40 | 64) && field.iter().all(u8::is_ascii_hexdigit) {
+                let mut record = [field; 9];
+                for field in &mut record[1..] {
+                    *field = fields.next()?;
+                }
+                let text = |offset: usize| String::from_utf8_lossy(record[offset]).into_owned();
+                let graph_prefix = graph.pop().unwrap_or_default();
+                return Some(Commit {
+                    oid: text(0),
+                    short: text(1),
+                    subject: text(2),
+                    author: text(3),
+                    date: text(4),
+                    committer: text(7),
+                    committed_at: text(8),
+                    decorations: text(5),
+                    parents: text(6).split_whitespace().map(str::to_owned).collect(),
+                    graph_prefix,
+                    graph_before: std::mem::take(&mut graph),
+                });
+            } else {
+                graph.extend(
+                    String::from_utf8_lossy(field)
+                        .split('\n')
+                        .filter(|line| !line.is_empty())
+                        .map(str::to_owned),
+                );
+            }
+        }
+    })
+}
+
+#[cfg(test)]
+mod history_error_tests {
+    use super::*;
+
+    fn failed_output(code: i32, truncated: bool, stderr: &[u8]) -> Output {
+        Output {
+            stdout: Vec::new(),
+            stderr: stderr.to_vec(),
+            code,
+            truncated,
         }
     }
-    commits
+
+    #[test]
+    fn overflow_killed_git_reports_read_limit_before_its_empty_exit_error() {
+        let output = failed_output(-1, true, b"");
+        let error = history_output_error(&output, 1_000_001)
+            .expect("overflow must fail rather than expose partial commits")
+            .to_string();
+        assert!(error.contains("512 MiB"), "{error}");
+        assert!(error.contains("1000001"), "{error}");
+        assert!(error.contains("Press L"), "{error}");
+        assert!(error.contains("smaller"), "{error}");
+        // Overflow remains the actionable cause even when Git did report stderr.
+        let output = failed_output(-1, true, b"broken pipe");
+        assert!(
+            history_output_error(&output, 5_000)
+                .unwrap()
+                .to_string()
+                .contains("512 MiB")
+        );
+    }
+
+    #[test]
+    fn history_failures_preserve_git_details_and_never_produce_an_empty_popup() {
+        let output = failed_output(128, false, b"fatal: bad revision 'missing'\n");
+        let error = history_output_error(&output, 300).unwrap().to_string();
+        assert!(error.contains("300"), "{error}");
+        assert!(error.contains("bad revision 'missing'"), "{error}");
+        let output = failed_output(-1, false, b"");
+        let error = history_output_error(&output, 1_000).unwrap().to_string();
+        assert!(error.contains("1000"), "{error}");
+        assert!(error.contains("exit code -1"), "{error}");
+        assert!(history_output_error(&failed_output(0, false, b""), 1_000).is_none());
+    }
+
+    #[test]
+    fn streamed_records_preserve_connector_rows_and_ignore_an_incomplete_final_record() {
+        let first = "a".repeat(40);
+        let second = "b".repeat(40);
+        let bytes = format!(
+            "* \0{first}\0aaaaaaa\0First subject\0Author One\02026-11-01\0HEAD -> main\0\0Committer One\02026-11-02\0\0|\\\n| * \0{second}\0bbbbbbb\0Second subject\0Author Two\02026-11-03\0feature\0{first}\0Committer Two\02026-11-04\0\0* \0{}\0partial",
+            "c".repeat(40)
+        );
+        let commits = parse_commits(bytes.as_bytes());
+        assert_eq!(commits.len(), 2);
+        assert_eq!(commits[0].oid, first);
+        assert_eq!(commits[0].committer, "Committer One");
+        assert_eq!(commits[1].oid, second);
+        assert_eq!(commits[1].parents, vec![first]);
+        assert_eq!(commits[1].graph_before, vec!["|\\"]);
+        assert_eq!(commits[1].graph_prefix, "| * ");
+        assert_eq!(commits[1].committed_at, "2026-11-04");
+    }
 }

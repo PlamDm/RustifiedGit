@@ -1,5 +1,5 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use pd_lazygit::{
+use rustifiedgit::{
     app::{App, Modal},
     config::{Config, State},
     git::Repository,

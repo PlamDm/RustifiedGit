@@ -1,11 +1,11 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use pd_lazygit::{
+use ratatui::{Terminal, backend::TestBackend};
+use rustifiedgit::{
     app::{App, Modal},
     config::{Config, State},
     git::{Operation, Repository},
     model::Panel,
 };
-use ratatui::{Terminal, backend::TestBackend};
 use std::{
     fs,
     path::Path,
@@ -131,7 +131,7 @@ fn busy_popup_names_commands_and_rejected_operation_is_never_queued() {
     );
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
     terminal
-        .draw(|frame| pd_lazygit::ui::draw(frame, app))
+        .draw(|frame| rustifiedgit::ui::draw(frame, app))
         .unwrap();
     let buffer = terminal.backend().buffer();
     let screen = (0..24)

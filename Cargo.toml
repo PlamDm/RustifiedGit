@@ -1,13 +1,13 @@
 [package]
-name = "pd-lazygit"
+name = "rustifiedgit"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
-description = "A responsive Rust terminal Git client ported from PlamDm/pd_lazygit"
+description = "A responsive Rust terminal Git client inspired by PlamDm/pd_lazygit"
 license = "MIT"
 
 [[bin]]
-name = "pd-lazygit"
+name = "rustifiedgit"
 path = "src/main.rs"
 
 [dependencies]

@@ -1,8 +1,9 @@
 use crate::{
     actions::{self, Action},
     branches::{self, BranchRow},
-    config::{Config, CustomCommand, State, key_matches},
+    config::{Config, CustomCommand, MAX_HISTORY_PAGE_SIZE, State, key_matches},
     git::{Operation, ReadOptions, Repository, Step, discard_operation, stage_operation},
+    history::{CommitOrder, GraphIndex},
     model::{CommitDetails, FileEntry, Panel, Preview, PreviewTarget, RefKind, Snapshot},
     patch::Patch,
     process::{Cancellation, CommandSpec},
@@ -52,6 +53,7 @@ pub enum MenuAction {
     HistoryClear,
     HistoryLimit(usize),
     HistoryMore,
+    HistoryRetry,
     ToggleLog,
     ToggleUnchanged,
     ToggleFilter,
@@ -106,7 +108,9 @@ pub struct SearchEdit {
 struct CommitSearchCache {
     commits: Arc<Vec<crate::model::Commit>>,
     query: String,
-    matches: Vec<usize>,
+    matches: CommitOrder,
+    head: String,
+    working_tree: usize,
 }
 
 pub struct App {
@@ -133,6 +137,7 @@ pub struct App {
     pub page_sizes: [usize; 11],
     pub search_edit: Option<SearchEdit>,
     commit_search_cache: RefCell<CommitSearchCache>,
+    graph_index_cache: RefCell<Option<Arc<GraphIndex>>>,
     pub branch_rows_cache: [Vec<BranchRow>; 2],
     pub collapsed_branches: [HashSet<String>; 2],
     pub graph_working_tree: bool,
@@ -162,6 +167,9 @@ pub struct App {
     pub output_scroll: usize,
     pub output_follow: bool,
     pub modal: Option<Modal>,
+    pub message_scroll: usize,
+    pub message_max_scroll: usize,
+    pub message_page_size: usize,
     pub pending_external: Option<CommandSpec>,
     pub pending_repo: Option<PathBuf>,
     pub busy: Option<(Cancellation, Instant, String)>,
@@ -169,6 +177,7 @@ pub struct App {
     pub history_loading: bool,
     pub history_exhausted: bool,
     pub history_elapsed_ms: u128,
+    pub history_error: Option<String>,
     history_key: Option<HistoryKey>,
     pub preview_loading: bool,
     pub changed_only: bool,
@@ -208,13 +217,19 @@ pub fn panel_index(panel: Panel) -> usize {
 impl App {
     pub fn new(repo: Repository, config: Config, mut state: State) -> Self {
         state.remember(&repo.root);
+        let requested = state.commit_limit.unwrap_or(config.git.commit_limit);
+        let page_size = if requested == 0 {
+            config.git.commit_limit.clamp(1, MAX_HISTORY_PAGE_SIZE)
+        } else {
+            requested.min(MAX_HISTORY_PAGE_SIZE)
+        };
+        let recovered = (page_size != requested).then(|| {
+            state.commit_limit = Some(page_size);
+            format!("Saved history initial/page size {requested} is outside the supported range 1–{MAX_HISTORY_PAGE_SIZE}.\n\nUsing {page_size} commits initially and per page. More commits still load as you navigate.\n\nYou can change this in the graph's Loaded commits… menu (L).")
+        });
         let options = ReadOptions {
             ignored: state.show_ignored,
-            commit_limit: state
-                .commit_limit
-                .filter(|limit| *limit > 0)
-                .unwrap_or(config.git.commit_limit)
-                .max(1),
+            commit_limit: page_size,
             graph: true,
             visible_refs: state
                 .visible_branches
@@ -225,7 +240,7 @@ impl App {
         };
         let workers = Workers::new(repo.clone());
         workers.refresh.submit(options.clone());
-        Self {
+        let mut app = Self {
             repo,
             config,
             state,
@@ -255,6 +270,7 @@ impl App {
             page_sizes: [15; 11],
             search_edit: None,
             commit_search_cache: RefCell::default(),
+            graph_index_cache: RefCell::default(),
             branch_rows_cache: std::array::from_fn(|_| Vec::new()),
             collapsed_branches: std::array::from_fn(|_| HashSet::new()),
             collapsed: HashSet::new(),
@@ -278,6 +294,9 @@ impl App {
             output_scroll: 0,
             output_follow: true,
             modal: None,
+            message_scroll: 0,
+            message_max_scroll: 0,
+            message_page_size: 8,
             pending_external: None,
             pending_repo: None,
             busy: None,
@@ -285,6 +304,7 @@ impl App {
             history_loading: false,
             history_exhausted: true,
             history_elapsed_ms: 0,
+            history_error: None,
             history_key: None,
             preview_loading: false,
             changed_only: true,
@@ -296,7 +316,12 @@ impl App {
             last_refresh: Instant::now(),
             last_fetch: Instant::now(),
             preview_key: None,
+        };
+        if let Some(message) = recovered {
+            app.error(message);
+            app.save_state();
         }
+        app
     }
 
     fn is(&self, group: &str, action: &str, defaults: &[&str], key: KeyEvent) -> bool {
@@ -556,10 +581,22 @@ impl App {
     }
     /// The worktree belongs to HEAD, even when another visible branch is newer.
     pub fn working_tree_graph_index(&self) -> usize {
-        self.filtered_commits()
-            .iter()
-            .position(|index| self.snapshot.commits[*index].oid == self.snapshot.head)
-            .unwrap_or(0)
+        self.filtered_commits();
+        self.commit_search_cache.borrow().working_tree
+    }
+    pub fn graph_index(&self) -> Arc<GraphIndex> {
+        let order = self.filtered_commits();
+        let searching = !self.search(Panel::Commits).is_empty();
+        let mut cached = self.graph_index_cache.borrow_mut();
+        if let Some(index) = cached
+            .as_ref()
+            .filter(|index| index.matches(&order, searching))
+        {
+            return index.clone();
+        }
+        let index = Arc::new(GraphIndex::new(order, &self.snapshot.commits, searching));
+        *cached = Some(index.clone());
+        index
     }
     pub fn commit_graph_row(&self, filtered_index: usize) -> usize {
         filtered_index + usize::from(filtered_index >= self.working_tree_graph_index())
@@ -746,44 +783,55 @@ impl App {
             .map(|(index, _)| index)
             .collect()
     }
-    pub fn filtered_commits(&self) -> Vec<usize> {
-        if self.search(Panel::Commits).is_empty() {
-            return (0..self.snapshot.commits.len()).collect();
-        }
+    pub fn filtered_commits(&self) -> CommitOrder {
         let mut cache = self.commit_search_cache.borrow_mut();
         let query = self.search(Panel::Commits);
-        if cache.query != query || !Arc::ptr_eq(&cache.commits, &self.snapshot.commits) {
-            let compiled = crate::fuzzy::Query::new(query);
-            let mut matches: Vec<_> = self
-                .snapshot
-                .commits
-                .iter()
-                .enumerate()
-                .filter_map(|(index, commit)| {
-                    compiled
-                        .score(&format!(
-                            "{} {} {} {} {}",
-                            commit.oid,
-                            commit.subject,
-                            commit.author,
-                            commit.committer,
-                            commit.decorations
-                        ))
-                        .map(|score| {
-                            (
-                                index,
-                                score
-                                    + compiled
-                                        .score(&commit.subject)
-                                        .map_or(0, |subject| 128 + subject.max(0)),
-                            )
-                        })
-                })
-                .collect();
-            matches.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-            cache.matches = matches.into_iter().map(|(index, _)| index).collect();
+        let changed = cache.query != query || !Arc::ptr_eq(&cache.commits, &self.snapshot.commits);
+        if changed {
+            if query.is_empty() {
+                cache.matches = CommitOrder::new((0..self.snapshot.commits.len()).collect());
+            } else {
+                let compiled = crate::fuzzy::Query::new(query);
+                let mut matches: Vec<_> = self
+                    .snapshot
+                    .commits
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, commit)| {
+                        compiled
+                            .score(&format!(
+                                "{} {} {} {} {}",
+                                commit.oid,
+                                commit.subject,
+                                commit.author,
+                                commit.committer,
+                                commit.decorations
+                            ))
+                            .map(|score| {
+                                (
+                                    index,
+                                    score
+                                        + compiled
+                                            .score(&commit.subject)
+                                            .map_or(0, |subject| 128 + subject.max(0)),
+                                )
+                            })
+                    })
+                    .collect();
+                matches.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+                cache.matches =
+                    CommitOrder::new(matches.into_iter().map(|(index, _)| index).collect());
+            }
             cache.commits = self.snapshot.commits.clone();
             cache.query = query.to_owned();
+        }
+        if changed || cache.head != self.snapshot.head {
+            cache.working_tree = cache
+                .matches
+                .iter()
+                .position(|index| self.snapshot.commits[*index].oid == self.snapshot.head)
+                .unwrap_or(0);
+            cache.head = self.snapshot.head.clone();
         }
         cache.matches.clone()
     }
@@ -897,12 +945,13 @@ impl App {
         }
         self.workers.history.submit(key.options.clone());
         self.history_key = Some(key);
+        self.history_error = None;
         self.history_loading = true;
         self.dirty = true;
     }
 
     fn load_more_history(&mut self) {
-        if self.history_loading || self.history_exhausted {
+        if self.history_loading || self.history_exhausted || self.history_error.is_some() {
             return;
         }
         self.options.commit_limit = self
@@ -917,16 +966,23 @@ impl App {
             .commit_limit
             .filter(|limit| *limit > 0)
             .unwrap_or(self.config.git.commit_limit)
-            .max(1)
+            .clamp(1, MAX_HISTORY_PAGE_SIZE)
     }
 
     fn set_history_limit(&mut self, limit: usize) -> Result<()> {
-        if limit == 0 {
-            bail!("Enter a positive number of commits");
+        if !(1..=MAX_HISTORY_PAGE_SIZE).contains(&limit) {
+            bail!(
+                "Enter a positive number between 1 and {MAX_HISTORY_PAGE_SIZE} commits.\nThis sets the initial/page size; more commits load as you navigate."
+            );
         }
         self.state.commit_limit = Some(limit);
         self.save_state();
         self.options.commit_limit = limit;
+        // Choosing a size is an explicit retry, including choosing the same
+        // size after a failed read. Routine status refreshes never retry it.
+        if self.history_error.is_some() {
+            self.history_key = None;
+        }
         self.request_history();
         self.notice = format!(
             "History initial/page size: {limit}; older commits load automatically near the end"
@@ -950,7 +1006,12 @@ impl App {
             label: "Custom initial/page size…".into(),
             action: MenuAction::Input(Prompt::HistoryLimit),
         });
-        if !self.history_exhausted && !self.history_loading {
+        if self.history_error.is_some() {
+            items.push(MenuItem {
+                label: "Retry failed history load".into(),
+                action: MenuAction::HistoryRetry,
+            });
+        } else if !self.history_exhausted && !self.history_loading {
             items.push(MenuItem {
                 label: format!("Load more now (+{size}; automatic paging stays on)"),
                 action: MenuAction::HistoryMore,
@@ -1120,8 +1181,20 @@ impl App {
                             self.request_preview(self.focus == Panel::Diff);
                         }
                         Err(error) => {
-                            self.history_key = None;
-                            self.error(error);
+                            // Keep the failed key: references/status refresh
+                            // events must not reopen this error every few seconds.
+                            self.history_error = Some(error.clone());
+                            let message = format!(
+                                "History load failed: {error}\n\nPreviously loaded commits were kept. Automatic retries are paused.\nOpen graph actions → Loaded commits… to choose a smaller page or retry."
+                            );
+                            self.append_output(&format!("\n✗ {message}\n"));
+                            self.state.hide_command_log = false;
+                            self.notice =
+                                "History loading paused after an error · L opens loading options"
+                                    .into();
+                            if self.modal.is_none() && self.search_edit.is_none() {
+                                self.error(message);
+                            }
                         }
                     }
                 }
@@ -1292,6 +1365,8 @@ impl App {
     }
     pub fn error(&mut self, message: String) {
         self.notice = message.clone();
+        self.message_scroll = 0;
+        self.message_max_scroll = 0;
         self.modal = Some(Modal::Message(message));
         self.dirty = true;
     }
@@ -1601,6 +1676,10 @@ impl App {
                 }
             }
             MenuAction::HistoryMore => self.load_more_history(),
+            MenuAction::HistoryRetry => {
+                self.history_key = None;
+                self.request_history();
+            }
             MenuAction::ToggleLog => {
                 self.state.hide_command_log = !self.state.hide_command_log;
                 self.save_state();
@@ -1631,7 +1710,7 @@ impl App {
             Prompt::Shell(true) => "Run interactive command",
             Prompt::HistoryPath => "Filter commit history by repository-relative path",
             Prompt::HistoryLimit => {
-                "Commit initial/page size (positive number; automatic paging stays on)"
+                "Commit initial/page size (1–1,000,000; automatic paging stays on)"
             }
             Prompt::Worktree(_) => "New worktree path",
             Prompt::Custom { command, index, .. } => command
@@ -1910,9 +1989,33 @@ impl App {
                 });
             }
             Modal::Message(message) => {
-                if !matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q')) {
-                    self.modal = Some(Modal::Message(message));
+                match key.code {
+                    KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
+                        self.message_scroll = 0;
+                        return Ok(());
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        self.message_scroll = (self.message_scroll + 1).min(self.message_max_scroll)
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        self.message_scroll = self.message_scroll.saturating_sub(1)
+                    }
+                    KeyCode::PageDown => {
+                        self.message_scroll = self
+                            .message_scroll
+                            .saturating_add(self.message_page_size.saturating_sub(1).max(1))
+                            .min(self.message_max_scroll)
+                    }
+                    KeyCode::PageUp => {
+                        self.message_scroll = self
+                            .message_scroll
+                            .saturating_sub(self.message_page_size.saturating_sub(1).max(1))
+                    }
+                    KeyCode::Home => self.message_scroll = 0,
+                    KeyCode::End => self.message_scroll = self.message_max_scroll,
+                    _ => {}
                 }
+                self.modal = Some(Modal::Message(message));
             }
         }
         Ok(())

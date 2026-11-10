@@ -7,7 +7,8 @@ use crossterm::{
     },
     execute,
 };
-use pd_lazygit::{
+use ratatui::{DefaultTerminal, Terminal, backend::TestBackend};
+use rustifiedgit::{
     app::App,
     config::{Config, State},
     git::{ReadOptions, Repository},
@@ -15,7 +16,6 @@ use pd_lazygit::{
     process::Cancellation,
     ui,
 };
-use ratatui::{DefaultTerminal, Terminal, backend::TestBackend};
 use std::{
     io::{self, IsTerminal},
     path::PathBuf,
@@ -24,9 +24,9 @@ use std::{
 
 #[derive(Parser)]
 #[command(
-    name = "pd-lazygit",
+    name = "rustifiedgit",
     version,
-    about = "Rust port of PlamDm/pd_lazygit",
+    about = "A native Rust terminal Git client",
     long_about = "A native Rust Git TUI with your fork's repository browsing, bounded previews, file history, external tools, and live command output."
 )]
 struct Args {
@@ -125,7 +125,7 @@ fn main() -> Result<()> {
         app.apply_snapshot(app.repo.snapshot(&app.options, &Cancellation::default())?);
         app.loading = false;
         app.preview = app.repo.preview(
-            &pd_lazygit::model::PreviewTarget::Status,
+            &rustifiedgit::model::PreviewTarget::Status,
             false,
             &app.config.gui,
             3,
@@ -183,7 +183,7 @@ fn run(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
             && app.busy.is_none()
             && app.last_fetch.elapsed() >= Duration::from_secs(app.config.refresher.fetch_interval)
         {
-            app.run_operation(pd_lazygit::git::Operation::git([
+            app.run_operation(rustifiedgit::git::Operation::git([
                 "fetch",
                 "--all",
                 "--prune",

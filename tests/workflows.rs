@@ -1,4 +1,4 @@
-use pd_lazygit::{
+use rustifiedgit::{
     config::GuiConfig,
     git::{Operation, ReadOptions, Repository, discard_operation, stage_operation},
     model::{FileEntry, PreviewTarget},
@@ -44,7 +44,7 @@ impl Fixture {
         git(self.dir.path(), ["add", "--all"]);
         git(self.dir.path(), ["commit", "-q", "-m", message]);
     }
-    fn snapshot(&self) -> pd_lazygit::model::Snapshot {
+    fn snapshot(&self) -> rustifiedgit::model::Snapshot {
         self.repo
             .snapshot(&ReadOptions::default(), &Cancellation::default())
             .unwrap()
@@ -60,7 +60,7 @@ impl Fixture {
         staged: bool,
         explicit: bool,
         settings: &GuiConfig,
-    ) -> pd_lazygit::model::Preview {
+    ) -> rustifiedgit::model::Preview {
         self.repo
             .preview(
                 &PreviewTarget::File {
@@ -166,7 +166,7 @@ fn stage_directory_excludes_ignored_and_unchanged_files() {
     fixture.write("dir/new", "new");
     fixture.write("dir/secret.log", "secret");
     let (files, _) = fixture.repo.files(true, &Cancellation::default()).unwrap();
-    let selected = pd_lazygit::tree::matching_files(&files, Path::new("dir"));
+    let selected = rustifiedgit::tree::matching_files(&files, Path::new("dir"));
     fixture.execute(stage_operation(&selected, false, true).unwrap());
     assert_eq!(
         git(fixture.dir.path(), ["diff", "--cached", "--name-only"]).trim(),
@@ -618,7 +618,7 @@ fn overwrite_pull_fetches_upstream_and_preserves_unrelated_untracked_files() {
     source.write("tracked.txt", "upstream contents\n");
     source.commit("upstream commit");
     git(source.dir.path(), ["push", "-q", "origin", "main"]);
-    local.execute(pd_lazygit::git::pull_overwrite_operation());
+    local.execute(rustifiedgit::git::pull_overwrite_operation());
     assert_eq!(
         git(local.dir.path(), ["rev-parse", "HEAD"]),
         git(source.dir.path(), ["rev-parse", "HEAD"])
@@ -652,7 +652,7 @@ fn overwrite_pull_fetches_upstream_and_preserves_unrelated_untracked_files() {
         local
             .repo
             .execute(
-                &pd_lazygit::git::pull_overwrite_operation(),
+                &rustifiedgit::git::pull_overwrite_operation(),
                 &Cancellation::default(),
                 None
             )
@@ -677,7 +677,7 @@ fn overwrite_pull_without_upstream_never_discards_local_changes() {
         fixture
             .repo
             .execute(
-                &pd_lazygit::git::pull_overwrite_operation(),
+                &rustifiedgit::git::pull_overwrite_operation(),
                 &Cancellation::default(),
                 None
             )
@@ -828,7 +828,7 @@ fn error_messages_preserve_git_failures() {
     };
     assert!(stage_operation(&[&malformed], false, false).is_err());
     assert!(
-        pd_lazygit::process::run(
+        rustifiedgit::process::run(
             fixture.dir.path(),
             &CommandSpec::git(["--version"]),
             &Cancellation::default(),
@@ -898,7 +898,7 @@ fn workspace_nuke_stashes_submodules_and_resets_their_recorded_commit() {
     fixture.write("root-file", "dirty root\n");
     fixture.write("untracked-root", "remove me");
     fixture.write("private.log", "keep ignored");
-    fixture.execute(pd_lazygit::git::nuke_working_tree_operation());
+    fixture.execute(rustifiedgit::git::nuke_working_tree_operation());
     assert_eq!(
         git(fixture.dir.path(), ["-C", "module", "rev-parse", "HEAD"]),
         recorded
@@ -1109,7 +1109,7 @@ fn headless_cli_renders_loaded_state_and_filters_history() {
     fixture.commit("one");
     fixture.write("two", "two\n");
     fixture.commit("two");
-    let binary = env!("CARGO_BIN_EXE_pd-lazygit");
+    let binary = env!("CARGO_BIN_EXE_rustifiedgit");
     let output = Command::new(binary)
         .args([
             OsStr::new("-p"),

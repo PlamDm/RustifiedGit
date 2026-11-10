@@ -1,5 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use pd_lazygit::{
+use ratatui::{Terminal, backend::TestBackend};
+use rustifiedgit::{
     app::{App, Modal, render_template},
     config::{Config, State, key_matches},
     git::{Repository, parse_status},
@@ -7,7 +8,6 @@ use pd_lazygit::{
     tree, ui,
     worker::Latest,
 };
-use ratatui::{Terminal, backend::TestBackend};
 use std::{
     collections::{BTreeMap, HashSet},
     fs,
@@ -264,7 +264,7 @@ fn diff_search_navigates_matches_without_replacing_explicit_preview() {
 
 #[test]
 fn copied_commits_keep_source_order_after_switching_branch_histories() {
-    use pd_lazygit::model::Commit;
+    use rustifiedgit::model::Commit;
     let (_dir, mut app) = app();
     app.focus = Panel::Commits;
     app.graph_working_tree = false;
@@ -298,7 +298,7 @@ fn copied_commits_keep_source_order_after_switching_branch_histories() {
     let Some(Modal::Confirm { operation, .. }) = &app.modal else {
         panic!("Expected cherry-pick confirmation")
     };
-    let pd_lazygit::git::Step::Command(command) = &operation.steps[0] else {
+    let rustifiedgit::git::Step::Command(command) = &operation.steps[0] else {
         panic!("Expected Git command")
     };
     assert_eq!(
@@ -314,8 +314,8 @@ fn native_path_bytes_survive_the_parser_and_command_builder() {
     use std::os::unix::ffi::OsStrExt;
     let (files, _) = parse_status(b"?? raw-\xff.txt\0").unwrap();
     assert_eq!(files[0].path.as_os_str().as_bytes(), b"raw-\xff.txt");
-    let operation = pd_lazygit::git::stage_operation(&[&files[0]], false, false).unwrap();
-    let pd_lazygit::git::Step::Command(command) = &operation.steps[0] else {
+    let operation = rustifiedgit::git::stage_operation(&[&files[0]], false, false).unwrap();
+    let rustifiedgit::git::Step::Command(command) = &operation.steps[0] else {
         panic!("Expected Git command")
     };
     assert_eq!(command.args.last().unwrap().as_bytes(), b"raw-\xff.txt");

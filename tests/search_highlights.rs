@@ -1,16 +1,16 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use pd_lazygit::{
+use ratatui::{
+    Terminal,
+    backend::TestBackend,
+    style::{Color, Modifier},
+};
+use rustifiedgit::{
     app::App,
     config::{Config, State},
     fuzzy::Query,
     git::Repository,
     model::Panel,
     ui,
-};
-use ratatui::{
-    Terminal,
-    backend::TestBackend,
-    style::{Color, Modifier},
 };
 use std::{
     fs,

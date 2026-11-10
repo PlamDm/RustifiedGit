@@ -1,12 +1,12 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use pd_lazygit::{
+use ratatui::{Terminal, backend::TestBackend, layout::Rect};
+use rustifiedgit::{
     app::App,
     config::{Config, State},
     git::Repository,
     model::Panel,
     ui,
 };
-use ratatui::{Terminal, backend::TestBackend, layout::Rect};
 use std::{
     fs,
     path::Path,
@@ -522,7 +522,7 @@ fn a_single_large_hunk_scrolls_immediately_and_can_still_be_staged_whole() {
 
 #[test]
 fn history_prefetches_past_the_first_page_and_status_refreshes_reuse_it() {
-    use pd_lazygit::git::HISTORY_PAGE_SIZE;
+    use rustifiedgit::git::HISTORY_PAGE_SIZE;
     use std::{io::Write, process::Stdio, sync::Arc};
 
     let (_dir, mut app, _) = fixture();
@@ -790,13 +790,13 @@ fn configured_branch_delimiters_support_nested_groups_and_flat_mode() {
             .all(|row| !row.is_group() && row.depth == 0)
     );
     std::sync::Arc::make_mut(&mut app.snapshot).worktrees = (0..3)
-        .map(|index| pd_lazygit::model::Worktree {
+        .map(|index| rustifiedgit::model::Worktree {
             path: format!("worktree-{index}").into(),
             ..Default::default()
         })
         .collect();
     app.branch_tab = 3;
-    app.selections[pd_lazygit::app::panel_index(Panel::Branches)] = 2;
+    app.selections[rustifiedgit::app::panel_index(Panel::Branches)] = 2;
     app.rebuild();
     assert_eq!(
         app.selected(Panel::Branches),
@@ -807,7 +807,7 @@ fn configured_branch_delimiters_support_nested_groups_and_flat_mode() {
 
 #[test]
 fn actions_menu_shows_focused_commands_and_runs_the_selected_action() {
-    use pd_lazygit::app::Modal;
+    use rustifiedgit::app::Modal;
     let (_dir, mut app, _) = fixture();
     key(&mut app, KeyCode::Char('O'));
     let Some(Modal::Actions { items, .. }) = &app.modal else {
@@ -875,7 +875,7 @@ fn actions_menu_shows_focused_commands_and_runs_the_selected_action() {
 
 #[test]
 fn action_menu_respects_remaps_disabled_actions_and_custom_commands() {
-    use pd_lazygit::{actions, app::Modal, config::CustomCommand};
+    use rustifiedgit::{actions, app::Modal, config::CustomCommand};
     let (_dir, mut app, _) = fixture();
     app.config.keybinding = serde_yaml::from_str(
         "universal:\n  select: '<ctrl+g>'\nfiles:\n  toggleStagedAll: '<disabled>'\n",
@@ -926,7 +926,7 @@ fn action_menu_respects_remaps_disabled_actions_and_custom_commands() {
 
 #[test]
 fn graph_fast_scrolling_tracks_visible_height_and_keeps_file_range_selection() {
-    use pd_lazygit::model::{FileEntry, Snapshot};
+    use rustifiedgit::model::{FileEntry, Snapshot};
     use std::{io::Write, process::Stdio, sync::Arc};
     let (_dir, mut app, _) = fixture();
     let parent = git(&app.repo.root, &["rev-parse", "HEAD"]);

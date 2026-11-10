@@ -12,7 +12,7 @@ from terminal_smoke import Session, fixture, git
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--rust", type=Path, default=Path(__file__).resolve().parents[1] / "target/release/pd-lazygit")
+    parser.add_argument("--rust", type=Path, default=Path(__file__).resolve().parents[1] / "target/release/rustifiedgit")
     parser.add_argument("--go", type=Path, required=True)
     parser.add_argument("--files", type=int, default=5000)
     parser.add_argument("--runs", type=int, default=5)

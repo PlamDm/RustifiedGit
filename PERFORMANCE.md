@@ -83,8 +83,8 @@ The Go reference is `pd_development` at
 ```sh
 cd ../pd_lazygit
 go build -mod=vendor -trimpath -ldflags=-s \
-  -o ../pd_lazygit_rust/target/benchmark-go-lazygit .
-cd ../pd_lazygit_rust
+  -o ../rustifiedgit/target/benchmark-go-lazygit .
+cd ../rustifiedgit
 cargo build --release --locked
 python3 scripts/compare_startup.py --go ./target/benchmark-go-lazygit
 ```
@@ -110,7 +110,7 @@ This is an internal Rust backend measurement; no equivalent Go backend result
 was measured. It is not a claim that all Git operations became faster.
 
 ```sh
-./target/release/pd-lazygit --benchmark --iterations 20 -p ../pd_lazygit
+./target/release/rustifiedgit --benchmark --iterations 20 -p ../pd_lazygit
 ```
 
 ## Responsiveness guarantees in the design

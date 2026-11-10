@@ -1,5 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use pd_lazygit::{
+use ratatui::{Terminal, backend::TestBackend, style::Modifier};
+use rustifiedgit::{
     app::App,
     config::{Config, State},
     fuzzy::{self, Query},
@@ -7,7 +8,6 @@ use pd_lazygit::{
     model::Panel,
     ui,
 };
-use ratatui::{Terminal, backend::TestBackend, style::Modifier};
 use std::{
     fs,
     path::Path,

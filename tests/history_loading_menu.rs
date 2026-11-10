@@ -1,5 +1,5 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use pd_lazygit::{
+use rustifiedgit::{
     app::{App, Modal, Prompt},
     config::{Config, State},
     git::Repository,
@@ -207,7 +207,7 @@ fn headless_snapshot_respects_configured_initial_commit_limit() {
     let cli_config = dir.path().join("cli-config");
     fs::create_dir(&cli_config).unwrap();
     fs::write(cli_config.join("config.yml"), "git:\n  commitLimit: 7\n").unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_pd-lazygit"))
+    let output = Command::new(env!("CARGO_BIN_EXE_rustifiedgit"))
         .arg("-p")
         .arg(&app.repo.root)
         .arg("--use-config-dir")
@@ -222,4 +222,129 @@ fn headless_snapshot_respects_configured_initial_commit_limit() {
     );
     let snapshot: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(snapshot["commits"].as_array().unwrap().len(), 7);
+}
+
+#[test]
+fn failed_history_read_keeps_commits_and_does_not_retry_on_status_refreshes() {
+    let (_dir, mut app) = fixture(120);
+    app.select_graph_row(app.commit_graph_row(10));
+    let selected = app.selected_commit().unwrap().oid.clone();
+    let previous = app.snapshot.commits.clone();
+    app.options.visible_refs = Some(vec!["invalid graph reference".into()]);
+    app.refresh();
+    wait(&mut app);
+    assert!(
+        app.history_error
+            .as_ref()
+            .is_some_and(|error| error.contains("Invalid graph reference"))
+    );
+    assert!(matches!(app.modal, Some(Modal::Message(_))));
+    assert!(std::sync::Arc::ptr_eq(&previous, &app.snapshot.commits));
+    assert_eq!(app.selected_commit().unwrap().oid, selected);
+    let failed_generation = app.workers.history.current();
+    key(&mut app, KeyCode::Esc);
+    for _ in 0..3 {
+        app.refresh();
+        wait(&mut app);
+        assert_eq!(app.workers.history.current(), failed_generation);
+        assert!(!app.history_loading);
+        assert!(
+            app.modal.is_none(),
+            "refresh reopened a dismissed history error"
+        );
+    }
+    assert_eq!(
+        app.output
+            .iter()
+            .filter(|line| line.contains("History load failed:"))
+            .count(),
+        1
+    );
+    app.select_graph_row(app.commit_graph_row(119));
+    assert_eq!(
+        app.workers.history.current(),
+        failed_generation,
+        "scrolling must not automatically retry a failed read"
+    );
+    assert_eq!(app.options.commit_limit, 120);
+}
+
+#[test]
+fn failed_history_can_be_retried_explicitly_and_recovered_with_a_new_request() {
+    use rustifiedgit::app::MenuAction;
+    let (_dir, mut app) = fixture(120);
+    app.options.visible_refs = Some(vec!["invalid graph reference".into()]);
+    app.refresh();
+    wait(&mut app);
+    let failed_generation = app.workers.history.current();
+    key(&mut app, KeyCode::Esc);
+    key(&mut app, KeyCode::Char('L'));
+    let retry = match app.modal.as_ref() {
+        Some(Modal::Menu { items, .. }) => {
+            assert!(
+                !items
+                    .iter()
+                    .any(|item| matches!(item.action, MenuAction::HistoryMore))
+            );
+            items
+                .iter()
+                .position(|item| matches!(item.action, MenuAction::HistoryRetry))
+                .unwrap()
+        }
+        _ => panic!("expected history options"),
+    };
+    for _ in 0..retry {
+        key(&mut app, KeyCode::Down);
+    }
+    key(&mut app, KeyCode::Enter);
+    assert!(app.history_loading);
+    wait(&mut app);
+    assert_eq!(app.workers.history.current(), failed_generation + 1);
+    assert!(app.history_error.is_some());
+    key(&mut app, KeyCode::Esc);
+    custom(&mut app, "120");
+    wait(&mut app);
+    assert_eq!(
+        app.workers.history.current(),
+        failed_generation + 2,
+        "choosing the same page size should explicitly retry"
+    );
+    assert!(app.history_error.is_some());
+    key(&mut app, KeyCode::Esc);
+    app.options.visible_refs = Some(vec!["HEAD".into()]);
+    app.refresh();
+    wait(&mut app);
+    assert_eq!(app.workers.history.current(), failed_generation + 3);
+    assert!(app.history_error.is_none());
+    assert!(app.modal.is_none());
+    assert_eq!(app.snapshot.commits.len(), 120);
+}
+
+#[test]
+fn background_history_error_does_not_replace_a_search_or_open_menu() {
+    for searching in [true, false] {
+        let (_dir, mut app) = fixture(120);
+        if searching {
+            key(&mut app, KeyCode::Char('/'));
+            app.paste("history".into());
+        } else {
+            key(&mut app, KeyCode::Char('L'));
+        }
+        app.options.visible_refs = Some(vec!["invalid graph reference".into()]);
+        app.refresh();
+        wait(&mut app);
+        assert!(app.history_error.is_some());
+        if searching {
+            assert!(app.search_edit.is_some());
+            assert_eq!(app.search(Panel::Commits), "history");
+            assert!(app.modal.is_none());
+        } else {
+            assert!(matches!(app.modal, Some(Modal::Menu { .. })));
+        }
+        assert!(
+            app.output
+                .iter()
+                .any(|line| line.contains("History load failed:"))
+        );
+    }
 }

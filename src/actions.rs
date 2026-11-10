@@ -859,7 +859,7 @@ pub fn for_app(app: &App) -> Vec<Action> {
             &format!("Choose initial/page size (currently {}); {} commits loaded, target {}. Older commits still load automatically near the end.",
                 app.history_page_size(), app.snapshot.commits.len(), app.options.commit_limit),
         );
-        if !app.history_exhausted {
+        if !app.history_exhausted && app.history_error.is_none() {
             catalog.key(
                 ".",
                 "Load older commits",

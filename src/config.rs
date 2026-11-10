@@ -8,6 +8,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+pub const MAX_HISTORY_PAGE_SIZE: usize = 1_000_000;
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct GuiConfig {
@@ -139,14 +141,34 @@ impl Default for State {
 }
 
 pub fn default_directory() -> PathBuf {
-    if let Some(dir) = env::var_os("XDG_CONFIG_HOME") {
-        return PathBuf::from(dir).join("pd-lazygit-rust");
+    let new_directory = if let Some(dir) = env::var_os("XDG_CONFIG_HOME") {
+        PathBuf::from(dir).join("rustifiedgit")
+    } else {
+        #[cfg(windows)]
+        if let Some(dir) = env::var_os("APPDATA") {
+            PathBuf::from(dir).join("rustifiedgit")
+        } else {
+            PathBuf::from(env::var_os("HOME").unwrap_or_else(|| ".".into()))
+                .join(".config/rustifiedgit")
+        }
+        #[cfg(not(windows))]
+        {
+            PathBuf::from(env::var_os("HOME").unwrap_or_else(|| ".".into()))
+                .join(".config/rustifiedgit")
+        }
+    };
+    if new_directory.exists() {
+        return new_directory;
     }
-    #[cfg(windows)]
-    if let Some(dir) = env::var_os("APPDATA") {
-        return PathBuf::from(dir).join("pd-lazygit-rust");
+    let legacy_directory = new_directory
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("pd-lazygit-rust");
+    if legacy_directory.exists() {
+        legacy_directory
+    } else {
+        new_directory
     }
-    PathBuf::from(env::var_os("HOME").unwrap_or_else(|| ".".into())).join(".config/pd-lazygit-rust")
 }
 
 fn merge(base: &mut Value, overlay: Value) {
@@ -184,8 +206,10 @@ impl Config {
         config.refresher.refresh_interval = config.refresher.refresh_interval.max(1);
         config.refresher.fetch_interval = config.refresher.fetch_interval.max(30);
         config.gui.command_log_size = config.gui.command_log_size.clamp(100, 100_000);
-        if config.git.commit_limit == 0 {
-            bail!("git.commitLimit must be a positive number of commits");
+        if !(1..=MAX_HISTORY_PAGE_SIZE).contains(&config.git.commit_limit) {
+            bail!(
+                "git.commitLimit must be a positive number between 1 and {MAX_HISTORY_PAGE_SIZE}"
+            );
         }
         if config
             .gui

@@ -1,4 +1,4 @@
-use pd_lazygit::{
+use rustifiedgit::{
     config::GuiConfig,
     git::{ReadOptions, Repository},
     model::PreviewTarget,

@@ -1,4 +1,4 @@
-# PD LazyGit — Rust
+# RustifiedGit
 
 A native Rust terminal Git client, ported from the `pd_development` branch of
 [PlamDm/pd_lazygit](https://github.com/PlamDm/pd_lazygit), revision
@@ -11,9 +11,9 @@ which workflows have native implementations and which compatibility work remains
 ## Run
 
 ```sh
-cd ~/Playground/pd_lazygit_rust
+cd ~/Playground/rustifiedgit
 cargo build --release --locked
-./target/release/pd-lazygit -p ~/Playground/pd_lazygit
+./target/release/rustifiedgit -p ~/Playground/pd_lazygit
 ```
 
 The repository pins Rust 1.88.0 through `rust-toolchain.toml`. Rustup selects it
@@ -23,10 +23,10 @@ profile enables thin LTO and a single code-generation unit.
 To open the Rust project itself:
 
 ```sh
-./target/release/pd-lazygit -p .
+./target/release/rustifiedgit -p .
 ```
 
-The command is `pd-lazygit`, so your installed Go `lazygit` stays available.
+The command is `rustifiedgit`, so your installed Go `lazygit` stays available.
 
 ## Numbered panes
 
@@ -118,7 +118,13 @@ loads the first 1,000 commits independently of file status by default. In the
 graph, open `o` → **Loaded commits…** (or press `L`) to choose an initial/page
 size from presets or enter a custom positive number. The menu shows the actual
 loaded count and current requested target. Your choice persists across restarts;
-`git.commitLimit` in YAML sets the default when no saved choice exists.
+`git.commitLimit` in YAML sets the default when no saved choice exists. Values
+from 1 through 1,000,000 are supported, and the `o` history menu can change the
+initial page size while automatic paging continues. History reads have a
+separate 512 MiB output budget; ordinary Git commands retain their smaller
+limit. A failed history read retains already loaded commits and pauses automatic
+retries. Press `L` to retry or choose a smaller page size. Long error messages
+can be scrolled inside the popup.
 Older commits still load automatically near the end, one chosen page at a time;
 `.` or **Load more now** explicitly requests another page. This sets the initial
 amount and page size, rather than a fixed cap on all history loading.
@@ -177,16 +183,18 @@ credential helpers and SSH agents continue to work through Git.
 
 ## Configuration
 
-Rust preferences default to `~/.config/pd-lazygit-rust` (`%APPDATA%` on Windows,
+RustifiedGit preferences default to `~/.config/rustifiedgit` (`%APPDATA%` on Windows,
 or `$XDG_CONFIG_HOME` when set). Nothing is written to the Go configuration
-unless you explicitly select its directory.
+unless you explicitly select its directory. Existing settings under
+`pd-lazygit-rust` are reused automatically until a `rustifiedgit` config
+directory exists.
 
 Existing LazyGit YAML can be selected with:
 
 ```sh
-./target/release/pd-lazygit --use-config-dir ~/Playground/config/lazygit
-./target/release/pd-lazygit --use-config-file ./config.yml,./local.yml
-./target/release/pd-lazygit --validate-config --use-config-file ./config.yml
+./target/release/rustifiedgit --use-config-dir ~/Playground/config/lazygit
+./target/release/rustifiedgit --use-config-file ./config.yml,./local.yml
+./target/release/rustifiedgit --validate-config --use-config-file ./config.yml
 ```
 
 Settings are merged in order. This version supports the fork's file/preview
@@ -240,9 +248,9 @@ The PTY smoke script runs on macOS/Linux and tests the actual terminal session.
 For read-only inspection and reproducible performance measurements:
 
 ```sh
-./target/release/pd-lazygit --snapshot -p /path/to/repo
-./target/release/pd-lazygit --render 120x40 -p /path/to/repo
-./target/release/pd-lazygit --benchmark --iterations 20 -p /path/to/repo
+./target/release/rustifiedgit --snapshot -p /path/to/repo
+./target/release/rustifiedgit --render 120x40 -p /path/to/repo
+./target/release/rustifiedgit --benchmark --iterations 20 -p /path/to/repo
 python3 scripts/compare_startup.py --go ./target/benchmark-go-lazygit
 ```
 
