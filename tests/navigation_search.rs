@@ -239,6 +239,54 @@ fn live_commit_search_accepts_cancels_ranks_and_drives_changed_files() {
 }
 
 #[test]
+fn live_branch_search_uses_ctrl_f_and_restores_the_selected_branch_on_cancel() {
+    let (_dir, mut app, _, _) = fixture();
+    let main_row = app
+        .branch_rows(false)
+        .iter()
+        .position(|row| {
+            row.reference
+                .is_some_and(|index| app.snapshot.references[index].name == "main")
+        })
+        .unwrap();
+    app.select_list_row(Panel::Branches, main_row);
+    app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+    assert!(app.search_edit.is_some());
+    for character in "feat".chars() {
+        key(&mut app, KeyCode::Char(character));
+    }
+    assert_eq!(app.refs_for(false).len(), 1);
+    assert!(
+        app.branch_rows(false)
+            .iter()
+            .any(|row| row.path == "feature")
+    );
+    assert!(
+        app.search_hint(Panel::Branches)
+            .unwrap()
+            .contains("1 matches")
+    );
+    key(&mut app, KeyCode::Esc);
+    assert!(app.search(Panel::Branches).is_empty());
+    assert_eq!(app.selected_branch_row().unwrap().path, "main");
+
+    app.set_focus(Panel::RemoteBranches);
+    app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+    for character in "origin/main".chars() {
+        key(&mut app, KeyCode::Char(character));
+    }
+    assert_eq!(app.refs_for(true).len(), 1);
+    assert!(
+        app.search_hint(Panel::RemoteBranches)
+            .unwrap()
+            .contains("1 matches")
+    );
+    key(&mut app, KeyCode::Enter);
+    assert!(app.search_edit.is_none());
+    assert_eq!(app.search(Panel::RemoteBranches), "origin/main");
+}
+
+#[test]
 fn file_tabs_keep_head_contents_and_filters_independent_of_hovered_commit() {
     let (_dir, mut app, head, feature) = fixture();
     let feature_index = app

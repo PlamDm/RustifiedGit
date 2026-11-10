@@ -98,7 +98,7 @@ upstream; branch rows show compact `↑n ↓n` counts. Counts use the locally kn
 remote refs and update on refresh/fetch. Missing or unset upstreams are labeled
 instead of being reported as zero.
 
-Press `/` or `Ctrl+f` in the graph or either file tab for live **fzf-style search**.
+Press `/` or `Ctrl+f` in the graph, branch panes or either file tab for live **fzf-style search**.
 Type to filter, use arrows or Ctrl+n/p to select, Enter to keep the filter,
 and Esc to cancel and restore the previous selection. Esc after accepting
 clears the filter. Commit matches are ranked, prioritizing subjects; file

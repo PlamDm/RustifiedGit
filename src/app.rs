@@ -102,6 +102,7 @@ pub struct SearchEdit {
     selection: usize,
     scroll: usize,
     working_tree: bool,
+    branch_row: Option<(String, bool)>,
 }
 
 #[derive(Default)]
@@ -494,6 +495,7 @@ impl App {
                 "7 inspect files · 0 inspect diff".into(),
             ]
         } else if let Some(commit) = self.selected_commit() {
+            let reference_lines = self.commit_reference_lines(&commit.oid);
             if let Some(details) = self
                 .commit_details
                 .as_ref()
@@ -510,19 +512,22 @@ impl App {
                     ),
                     format!("Date: {}", details.committed_at),
                     format!("Parents: {}", details.parents.join(" ")),
-                    format!("{} changed files", self.commit_files.len()),
                 ]);
+                lines.extend(reference_lines);
+                lines.push(format!("{} changed files", self.commit_files.len()));
                 lines
             } else {
-                vec![
+                let mut lines = vec![
                     format!("Commit {}", commit.oid),
                     format!("Author: {}", commit.author),
                     format!("Date: {}", commit.date),
                     String::new(),
                     commit.subject.clone(),
                     String::new(),
-                    "Loading full message and changed files…".into(),
-                ]
+                ];
+                lines.extend(reference_lines);
+                lines.push("Loading full message and changed files…".into());
+                lines
             }
         } else {
             vec![
@@ -530,6 +535,34 @@ impl App {
                 "Space on a branch toggles its graph visibility.".into(),
             ]
         };
+    }
+    fn commit_reference_lines(&self, oid: &str) -> Vec<String> {
+        let names = |kind| {
+            self.snapshot
+                .references
+                .iter()
+                .filter(|reference| reference.oid == oid && reference.kind == kind)
+                .map(|reference| reference.name.as_str())
+                .collect::<Vec<_>>()
+        };
+        [
+            (RefKind::Branch, "Local branches"),
+            (RefKind::Remote, "Remote branches"),
+            (RefKind::Tag, "Tags"),
+        ]
+        .into_iter()
+        .map(|(kind, label)| {
+            let names = names(kind);
+            format!(
+                "{label}: {}",
+                if names.is_empty() {
+                    "—".into()
+                } else {
+                    names.join(", ")
+                }
+            )
+        })
+        .collect()
     }
     fn sync_inspection(&mut self) {
         if !self.graph_working_tree && self.selected_commit().is_none() {
@@ -773,13 +806,12 @@ impl App {
         } else {
             Panel::Branches
         };
+        let query = crate::fuzzy::Query::new(self.search(panel));
         self.snapshot
             .references
             .iter()
             .enumerate()
-            .filter(|(_, reference)| {
-                reference.kind == kind && fuzzy_match(&reference.name, self.search(panel))
-            })
+            .filter(|(_, reference)| reference.kind == kind && query.is_match(&reference.name))
             .map(|(index, _)| index)
             .collect()
     }
@@ -1465,6 +1497,12 @@ impl App {
             selection: self.selected(self.focus),
             scroll: self.scrolls[panel_index(self.focus)],
             working_tree: self.graph_working_tree,
+            branch_row: matches!(self.focus, Panel::Branches | Panel::RemoteBranches)
+                .then(|| {
+                    self.selected_branch_row()
+                        .map(|row| (row.path.clone(), row.is_group()))
+                })
+                .flatten(),
         });
         self.dirty = true;
     }
@@ -1485,6 +1523,7 @@ impl App {
             Panel::Files => self.rebuild(),
             Panel::CommitFiles => self.rebuild_commit_rows(),
             Panel::HeadFiles => self.rebuild_head_rows(),
+            Panel::Branches | Panel::RemoteBranches => self.rebuild_branch_rows(),
             _ => {}
         }
         self.diff_line = 0;
@@ -1507,6 +1546,16 @@ impl App {
                 self.selections[panel_index(edit.panel)] = edit.selection;
                 self.scrolls[panel_index(edit.panel)] = edit.scroll;
                 self.graph_working_tree = edit.working_tree;
+                if let Some((path, group)) = edit.branch_row {
+                    let remote = edit.panel == Panel::RemoteBranches;
+                    if let Some(index) = self
+                        .branch_rows(remote)
+                        .iter()
+                        .position(|row| row.path == path && row.is_group() == group)
+                    {
+                        self.selections[panel_index(edit.panel)] = index;
+                    }
+                }
                 self.clamp_selections();
                 if edit.panel == Panel::Commits {
                     self.sync_inspection();
@@ -1580,6 +1629,8 @@ impl App {
             Panel::Files => self.rows.iter().filter(|row| !row.directory).count(),
             Panel::CommitFiles => self.commit_rows.iter().filter(|row| !row.directory).count(),
             Panel::HeadFiles => self.head_rows.iter().filter(|row| !row.directory).count(),
+            Panel::Branches if self.branch_tab != 3 => self.refs_for(false).len(),
+            Panel::RemoteBranches => self.refs_for(true).len(),
             _ => return None,
         };
         Some(format!(
@@ -2165,20 +2216,23 @@ impl App {
             self.modal = Some(Modal::Help { scroll: 0 });
             return Ok(());
         }
-        if self.is("universal", "startSearch", &["/"], key)
-            || (matches!(
-                self.focus,
-                Panel::Commits | Panel::Files | Panel::CommitFiles | Panel::HeadFiles
-            ) && self.is("universal", "fuzzySearch", &["<ctrl+f>"], key))
+        let live_search_panel = matches!(
+            self.focus,
+            Panel::Commits
+                | Panel::Files
+                | Panel::CommitFiles
+                | Panel::HeadFiles
+                | Panel::RemoteBranches
+        ) || (self.focus == Panel::Branches && self.branch_tab != 3);
+        if live_search_panel
+            && (self.is("universal", "startSearch", &["/"], key)
+                || self.is("universal", "fuzzySearch", &["<ctrl+f>"], key))
         {
-            if matches!(
-                self.focus,
-                Panel::Commits | Panel::Files | Panel::CommitFiles | Panel::HeadFiles
-            ) {
-                self.start_live_search();
-            } else {
-                self.prompt_for(Prompt::Search);
-            }
+            self.start_live_search();
+            return Ok(());
+        }
+        if self.is("universal", "startSearch", &["/"], key) {
+            self.prompt_for(Prompt::Search);
             return Ok(());
         }
         if matches!(self.focus, Panel::Diff | Panel::Output) && !self.search(self.focus).is_empty()

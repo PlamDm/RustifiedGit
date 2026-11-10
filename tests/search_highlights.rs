@@ -219,3 +219,28 @@ fn graph_hash_and_active_branch_decorations_keep_their_styles_and_highlight_matc
     assert!((0..4).all(|offset| highlighted(&terminal, x + offset, y)));
     assert!(!highlighted(&terminal, x - 1, y));
 }
+
+#[test]
+fn ctrl_f_branch_search_filters_and_highlights_nested_branch_names() {
+    let (_dir, mut app) = fixture();
+    git(&app.repo.root, &["branch", "feature/configuration"]);
+    app.refresh();
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while app.loading {
+        app.poll_workers();
+        assert!(Instant::now() < deadline, "{}", app.notice);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    app.set_focus(Panel::Branches);
+    app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+    app.paste("feat".into());
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(app.refs_for(false).len(), 1);
+    let terminal = screen(&mut app, 180);
+    let branches = ui::areas(ratatui::layout::Rect::new(0, 0, 180, 42), &app).local;
+    let (x, y) = find(&terminal, branches, "feature");
+    assert!(highlighted(&terminal, x, y));
+    assert!(highlighted(&terminal, x + 1, y));
+    assert!(highlighted(&terminal, x + 2, y));
+    assert!(highlighted(&terminal, x + 3, y));
+}

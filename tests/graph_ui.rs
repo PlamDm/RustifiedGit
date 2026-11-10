@@ -338,6 +338,33 @@ fn graph_navigation_loads_message_files_and_diff_without_stealing_focus() {
 }
 
 #[test]
+fn hovered_commit_details_list_local_remote_branches_and_tags() {
+    let (_dir, mut app, feature) = fixture();
+    git(&app.repo.root, &["tag", "v1.0", &feature]);
+    app.options.visible_refs = Some(vec!["refs/heads/main".into(), "refs/heads/feature".into()]);
+    app.refresh();
+    wait(&mut app, |app| !app.loading);
+    let filtered_index = app
+        .filtered_commits()
+        .iter()
+        .position(|index| app.snapshot.commits[*index].oid == feature)
+        .unwrap();
+    app.select_graph_row(app.commit_graph_row(filtered_index));
+    wait(&mut app, |app| !app.inspection_loading);
+    assert!(
+        app.details_lines
+            .iter()
+            .any(|line| line == "Local branches: feature")
+    );
+    assert!(
+        app.details_lines
+            .iter()
+            .any(|line| line == "Remote branches: origin/feature")
+    );
+    assert!(app.details_lines.iter().any(|line| line == "Tags: v1.0"));
+}
+
+#[test]
 fn rapid_graph_navigation_discards_stale_inspections_and_preserves_selected_oid_on_refresh() {
     let (_dir, mut app, _) = fixture();
     app.select_graph_row(1);
