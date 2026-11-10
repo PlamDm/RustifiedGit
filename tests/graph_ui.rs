@@ -109,6 +109,162 @@ fn screen(app: &mut App, width: u16, height: u16) -> String {
 }
 
 #[test]
+fn keyboard_help_searches_immediately_and_never_runs_typed_shortcuts() {
+    use rustifiedgit::app::Modal;
+    let (_dir, mut app, _) = fixture();
+    let head = git(&app.repo.root, &["rev-parse", "HEAD"]);
+    let status = git(&app.repo.root, &["status", "--porcelain"]);
+    key(&mut app, KeyCode::Char('?'));
+    let rendered = screen(&mut app, 120, 36);
+    for label in [
+        "Keyboard help",
+        "Type to search",
+        "Shortcut",
+        "Command",
+        "Pane / topic",
+    ] {
+        assert!(rendered.contains(label), "{rendered}");
+    }
+    for character in "stash".chars() {
+        key(&mut app, KeyCode::Char(character));
+    }
+    let Modal::Help { state } = app.modal.as_ref().unwrap() else {
+        panic!("help closed")
+    };
+    assert_eq!(state.query, "stash");
+    assert!(
+        state
+            .matches()
+            .iter()
+            .any(|index| state.entries[*index].label == "Inspect stashed files")
+    );
+    key(&mut app, KeyCode::PageDown);
+    let Modal::Help { state } = app.modal.as_ref().unwrap() else {
+        unreachable!()
+    };
+    assert_eq!(
+        state.selected,
+        (state.page_size - 1).min(state.matches().len() - 1)
+    );
+    for character in "qjk?".chars() {
+        key(&mut app, KeyCode::Char(character));
+    }
+    key(&mut app, KeyCode::Enter);
+    let Modal::Help { state } = app.modal.as_ref().unwrap() else {
+        panic!("text executed")
+    };
+    assert_eq!(state.query, "stashqjk?");
+    assert!(!app.quit);
+    assert!(app.busy.is_none());
+    assert_eq!(git(&app.repo.root, &["rev-parse", "HEAD"]), head);
+    assert_eq!(git(&app.repo.root, &["status", "--porcelain"]), status);
+    key(&mut app, KeyCode::Esc);
+    assert!(app.modal.is_none());
+    key(&mut app, KeyCode::Char('?'));
+    let Modal::Help { state } = app.modal.as_ref().unwrap() else {
+        unreachable!()
+    };
+    assert!(state.query.is_empty());
+    assert_eq!(state.selected, 0);
+}
+
+#[test]
+fn keyboard_help_handles_paste_empty_results_highlights_and_small_screens() {
+    use ratatui::style::Modifier;
+    use rustifiedgit::app::Modal;
+    let (_dir, mut app, _) = fixture();
+    key(&mut app, KeyCode::Char('?'));
+    app.paste("cherry-pick selected files".into());
+    let text = screen(&mut app, 120, 36);
+    assert!(text.contains("Cherry-pick selected files"), "{text}");
+    let mut terminal = Terminal::new(TestBackend::new(120, 36)).unwrap();
+    terminal.draw(|frame| ui::draw(frame, &mut app)).unwrap();
+    assert!(
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .any(|cell| cell.modifier.contains(Modifier::UNDERLINED))
+    );
+    app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+    app.paste("zzzz-no-such-command-🦀\n".into());
+    let text = screen(&mut app, 120, 36);
+    assert!(text.contains("No matching commands"), "{text}");
+    key(&mut app, KeyCode::End);
+    let Modal::Help { state } = app.modal.as_ref().unwrap() else {
+        unreachable!()
+    };
+    assert_eq!(state.selected, 0);
+    assert!(!state.query.contains('\n'));
+    app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+    for (width, height) in [(120, 36), (80, 24), (40, 10), (20, 6), (1, 1)] {
+        screen(&mut app, width, height);
+        key(&mut app, KeyCode::End);
+        screen(&mut app, width, height);
+        key(&mut app, KeyCode::Home);
+    }
+}
+
+#[test]
+fn keyboard_help_includes_new_commands_remaps_disabled_and_other_context_custom_commands() {
+    use rustifiedgit::{app::Modal, config::CustomCommand};
+    let (_dir, mut app, _) = fixture();
+    app.config.keybinding = serde_yaml::from_str(
+        "universal:\n  optionMenu: '<ctrl+h>'\n  pull: '<ctrl+p>'\nfiles:\n  commitChanges: ['<ctrl+g>', '<ctrl+j>']\ncommits:\n  pasteCommits: '<disabled>'\n"
+    ).unwrap();
+    app.config.custom_commands.push(CustomCommand {
+        key: "z".into(),
+        context: "stash".into(),
+        description: "Archive stash externally".into(),
+        command: "printf custom-stash-command".into(),
+        ..CustomCommand::default()
+    });
+    app.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::CONTROL));
+    let Modal::Help { state } = app.modal.as_ref().unwrap() else {
+        panic!("remapped help did not open")
+    };
+    let entries = &state.entries;
+    for label in [
+        "Cherry-pick selected files…",
+        "Inspect stashed files",
+        "Compare with base branch",
+        "Loaded commits…",
+        "Changes / HEAD tree",
+        "Force push with lease…",
+        "Rebase + autostash",
+        "Details / output…",
+        "Archive stash externally",
+    ] {
+        assert!(
+            entries.iter().any(|entry| entry.label == label),
+            "missing: {label}"
+        );
+    }
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry.label == "Commit changes…" && entry.keys == "Ctrl+g / Ctrl+j")
+    );
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry.label == "Cherry-pick copied commits…" && entry.keys == "Disabled")
+    );
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry.label == "Fast-forward only" && entry.keys == "Ctrl+p → 1")
+    );
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry.label == "Archive stash externally"
+                && entry.section == "Custom: stash")
+    );
+}
+
+#[test]
 fn browsing_stashes_updates_file_pane_and_keeps_it_active_after_refresh() {
     let (_dir, mut app, _) = fixture();
     let root = app.repo.root.clone();

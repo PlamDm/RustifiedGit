@@ -78,6 +78,13 @@ Enter or its shortcut to run it, and Esc to close. The bottom hints come from
 the same action list. Menus honor key remaps, disabled bindings and custom
 commands; repository-changing actions retain their existing confirmations.
 
+`?` opens the keyboard reference with search already active: type a command,
+shortcut or pane name to filter it. The list includes current-pane actions,
+all panes' commands, menu options and custom commands, using configured keys.
+Matching letters are highlighted; Up/Down selects a row and its description
+appears below. PageUp/PageDown scroll by the visible page, Ctrl+U clears the
+query, and Esc closes help. Typing in help only searches; it does not run commands.
+
 Move with `j`/`k` in pane 5 to update the full commit message, metadata, changed
 files and selected file's diff. Focus stays in the graph. `Enter` moves to files;
 another `Enter` opens the file's diff full screen. `Esc` restores the pane layout

@@ -4,6 +4,7 @@ pub mod branches;
 pub mod config;
 pub mod fuzzy;
 pub mod git;
+pub mod help;
 pub mod history;
 pub mod model;
 pub mod patch;

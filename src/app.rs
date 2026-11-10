@@ -3,6 +3,7 @@ use crate::{
     branches::{self, BranchRow},
     config::{Config, CustomCommand, MAX_HISTORY_PAGE_SIZE, State, key_matches},
     git::{Operation, ReadOptions, Repository, Step, discard_operation, stage_operation},
+    help::HelpState,
     history::{CommitOrder, GraphIndex},
     model::{
         CommitDetails, ComparisonInfo, ComparisonRequest, FileEntry, Panel, Preview, PreviewTarget,
@@ -101,7 +102,7 @@ pub enum Modal {
         selected: usize,
     },
     Help {
-        scroll: usize,
+        state: HelpState,
     },
     Message(String),
 }
@@ -2620,16 +2621,10 @@ impl App {
                     selected,
                 });
             }
-            Modal::Help { mut scroll } => {
-                match key.code {
-                    KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?') => return Ok(()),
-                    KeyCode::Down | KeyCode::Char('j') => scroll += 1,
-                    KeyCode::Up | KeyCode::Char('k') => scroll = scroll.saturating_sub(1),
-                    KeyCode::PageDown => scroll += 15,
-                    KeyCode::PageUp => scroll = scroll.saturating_sub(15),
-                    _ => {}
+            Modal::Help { mut state } => {
+                if !state.key(key) {
+                    self.modal = Some(Modal::Help { state });
                 }
-                self.modal = Some(Modal::Help { scroll });
             }
             Modal::Actions {
                 title,
@@ -2708,7 +2703,10 @@ impl App {
     }
 
     pub fn paste(&mut self, text: String) {
-        if self.search_edit.is_some() {
+        if let Some(Modal::Help { state }) = &mut self.modal {
+            state.paste(&text);
+            self.dirty = true;
+        } else if self.search_edit.is_some() {
             let mut query = self.search(self.focus).to_owned();
             query.push_str(&text.replace(['\r', '\n'], " "));
             self.apply_live_search(query);
@@ -2858,7 +2856,9 @@ impl App {
             return Ok(());
         }
         if self.is("universal", "optionMenu", &["?"], key) {
-            self.modal = Some(Modal::Help { scroll: 0 });
+            self.modal = Some(Modal::Help {
+                state: HelpState::new(self),
+            });
             return Ok(());
         }
         let live_search_panel = matches!(

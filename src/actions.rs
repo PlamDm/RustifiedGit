@@ -1086,7 +1086,7 @@ pub fn for_app(app: &App) -> Vec<Action> {
             "executeShellCommand",
             ":",
             "Run command…",
-            "Run a command with live output in pane 8.",
+            "Run a command with live output in pane 6's Output tab.",
         );
         catalog.key(
             "!",

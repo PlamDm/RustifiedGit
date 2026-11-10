@@ -1429,7 +1429,176 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
     )
 }
 
+fn help_layout(area: Rect) -> (Rect, [Rect; 5]) {
+    let rect = centered(area, 120, area.height.saturating_sub(2));
+    let inner = rect.inner(ratatui::layout::Margin::new(1, 1));
+    let parts = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(u16::from(inner.height >= 8)),
+        Constraint::Min(1),
+        Constraint::Length(if inner.height >= 12 {
+            4
+        } else if inner.height >= 8 {
+            2
+        } else {
+            0
+        }),
+        Constraint::Length(u16::from(inner.height >= 4)),
+    ])
+    .split(inner);
+    (rect, [parts[0], parts[1], parts[2], parts[3], parts[4]])
+}
+
+fn help_row(
+    entry: &crate::help::Entry,
+    query: &crate::fuzzy::Query,
+    width: usize,
+) -> (Line<'static>, Line<'static>) {
+    let key_width = if width >= 80 { 22 } else { (width / 3).min(16) };
+    let section_width = if width >= 70 { 18 } else { 0 };
+    let label_width = width.saturating_sub(key_width + section_width + 4);
+    let key = elide(&clean(&entry.keys), key_width);
+    let label = elide(&clean(&entry.label), label_width);
+    let mut spans = vec![
+        Span::styled(
+            format!("{key:>key_width$}  "),
+            Style::default().fg(if entry.keys == "Disabled" {
+                MUTED
+            } else {
+                ACCENT
+            }),
+        ),
+        Span::raw(label.clone()),
+    ];
+    if section_width > 0 {
+        spans.push(Span::raw(
+            " ".repeat(label_width.saturating_sub(Line::raw(&label).width()) + 2),
+        ));
+        spans.push(Span::styled(
+            elide(&clean(&entry.section), section_width),
+            Style::default().fg(MUTED),
+        ));
+    }
+    let row_text: String = spans.iter().map(|span| span.content.as_ref()).collect();
+    let row_chars = row_text.chars().count();
+    let description = format!("{} · {}", clean(&entry.section), clean(&entry.description));
+    let positions = query
+        .positions(&format!("{row_text}\n{description}"))
+        .unwrap_or_default();
+    let row_positions: Vec<_> = positions
+        .iter()
+        .copied()
+        .filter(|index| *index < row_chars)
+        .collect();
+    let description_positions: Vec<_> = positions
+        .into_iter()
+        .filter_map(|index| index.checked_sub(row_chars + 1))
+        .collect();
+    (
+        Line::from(highlighted_spans(spans, &row_positions)),
+        Line::from(highlighted_spans(
+            vec![Span::styled(
+                description,
+                Style::default().fg(Color::LightBlue),
+            )],
+            &description_positions,
+        )),
+    )
+}
+
+fn draw_help(frame: &mut Frame, area: Rect, state: &crate::help::HelpState) {
+    let (rect, parts) = help_layout(area);
+    let matches = state.matches();
+    frame.render_widget(Clear, rect);
+    frame.render_widget(
+        block(
+            format!(
+                "Keyboard help · {} / {} commands",
+                matches.len(),
+                state.entries.len()
+            ),
+            true,
+        ),
+        rect,
+    );
+    let search_width = parts[0].width.saturating_sub(3) as usize;
+    let mut visible_query = state.query.clone();
+    while !visible_query.is_empty() && Line::raw(&visible_query).width() > search_width {
+        visible_query.remove(0);
+    }
+    let search = Line::from(vec![
+        Span::styled(
+            "/ ",
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ),
+        if state.query.is_empty() {
+            Span::styled(
+                "Type to search commands, shortcuts or panes…",
+                Style::default().fg(MUTED),
+            )
+        } else {
+            Span::raw(visible_query.clone())
+        },
+    ]);
+    frame.render_widget(Paragraph::new(search), parts[0]);
+    if parts[0].width > 2 && parts[0].height > 0 {
+        frame.set_cursor_position((
+            parts[0].x + 2 + Line::raw(&visible_query).width() as u16,
+            parts[0].y,
+        ));
+    }
+    let width = parts[2].width.saturating_sub(2) as usize;
+    let query = crate::fuzzy::Query::new(&state.query);
+    let headings = crate::help::Entry {
+        keys: "Shortcut".into(),
+        label: "Command".into(),
+        section: "Pane / topic".into(),
+        description: String::new(),
+    };
+    let mut heading = help_row(&headings, &crate::fuzzy::Query::new(""), width).0;
+    heading.spans.insert(0, Span::raw("  "));
+    frame.render_widget(
+        Paragraph::new(heading).style(Style::default().fg(MUTED).add_modifier(Modifier::BOLD)),
+        parts[1],
+    );
+    if matches.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No matching commands. Backspace edits · Ctrl+U clears search.")
+                .style(Style::default().fg(MUTED))
+                .wrap(Wrap { trim: false }),
+            parts[2],
+        );
+    } else {
+        let selected = state.selected.min(matches.len() - 1);
+        let rows: Vec<_> = matches
+            .iter()
+            .map(|index| ListItem::new(help_row(&state.entries[*index], &query, width).0))
+            .collect();
+        let mut list_state = ListState::default().with_selected(Some(selected));
+        frame.render_stateful_widget(
+            List::new(rows)
+                .highlight_style(Style::default().bg(SELECTED))
+                .highlight_symbol("› "),
+            parts[2],
+            &mut list_state,
+        );
+        let description = help_row(&state.entries[matches[selected]], &query, width).1;
+        frame.render_widget(
+            Paragraph::new(vec![Line::raw(""), description]).wrap(Wrap { trim: false }),
+            parts[3],
+        );
+    }
+    frame.render_widget(
+        Paragraph::new("Type to filter · ↑↓ select · PgUp/PgDn page · Ctrl+U clear · Esc close")
+            .style(Style::default().fg(Color::Yellow)),
+        parts[4],
+    );
+}
+
 fn draw_modal(frame: &mut Frame, app: &mut App) {
+    if let Some(Modal::Help { state }) = &mut app.modal {
+        state.page_size = help_layout(frame.area()).1[2].height.max(1) as usize;
+    }
     let Some(modal) = &app.modal else {
         return;
     };
@@ -1546,16 +1715,7 @@ fn draw_modal(frame: &mut Frame, app: &mut App) {
                 &mut state,
             );
         }
-        Modal::Help { scroll } => {
-            let rect = centered(area, 105, area.height.saturating_sub(4));
-            frame.render_widget(Clear, rect);
-            frame.render_widget(
-                Paragraph::new(HELP)
-                    .scroll(((*scroll).min(u16::MAX as usize) as u16, 0))
-                    .block(block("Keys · j/k scroll · Esc close", true)),
-                rect,
-            );
-        }
+        Modal::Help { state } => draw_help(frame, area, state),
         Modal::Actions {
             title,
             items,
@@ -1689,5 +1849,3 @@ pub fn hit_test(area: Rect, app: &App, x: u16, y: u16) -> Option<(Panel, usize)>
     }
     None
 }
-
-pub const HELP: &str = "Numbered panes\n  1 Repositories · 2 Local branches · 3 Remote branches · 4 Stashes\n  5 Commit graph · 6 Details/Output · 7 Changed files · 0 Diff\n  Number keys focus panes · Tab/Shift+Tab cycle · + zoom focused pane\n  [ / ] in pane 6 switches Details / Output; 8 opens Output directly.\n  O opens context actions; o also works where it is not the file opener.\n  Choose with arrows; Enter/shortcut runs; descriptions appear below.\n  j/k or arrows move · Home/End/PageUp/PageDown scroll · / search\n  Esc clears file selection/returns · q quits · Ctrl+r recent repos · @ Details/Output\n\nBranches and graph\n  Space toggles a branch in the graph; this does not check it out.\n  Enabled local and remote branches are combined with shared ancestors.\n  Slash-delimited branches form nested groups: feature/user/login.\n  Enter toggles groups; Left/Right navigates; Space toggles a whole group.\n  Enter checks out the selected branch · * marks the current branch.\n  Branch visibility is saved separately for each repository.\n  j/k in the graph updates details and files without moving focus.\n  Shift+Up/Down or PageUp/PageDown moves by a visible page of commits.\n  The right edge shows committer initials/date/time; branch and tag labels take priority over subjects.\n  Working tree / Index appears directly above the active branch tip.\n  Enter in graph focuses files · Enter on a file opens its diff full screen; Esc returns to files.\n  [ / ] in local branches switches branches/tags/worktrees.\n  [ / ] switches commits/reflog · . loads another page of commits.\n  The active branch is bold; AHEAD/BEHIND compares its known upstream.\n  L or actions → Loaded commits sets the saved initial/page size.\n  Older commits load automatically near the end; + means more remain.\n  G builds Git's acceleration cache for large repositories.\n\nComparing revisions\n  B opens comparison options from the graph, branches or files.\n  Mark A, select B, then Compare marked; or enter two revision names.\n  Compare with base branch uses common ancestor -> selected branch.\n  Pane 7 lists changes; pane 0 shows the selected file diff; pane 6 summarizes.\n  Comparisons are read only; B can swap direction or close.\n  Esc from diff returns to files; Esc again or 5 returns to the graph.\n\nFile tabs and selection\n  [ / ] in pane 7 switches Changes / HEAD tree.\n  Changes follows the hovered commit; HEAD tree shows committed HEAD files.\n  Shift+Up/Down selects files/folders; v marks/unmarks; Esc clears selection.\n  Folders include their descendants; * toggles all folders; - collapses; = expands.\n  Commit files: V applies and stages selected commit changes without committing.\n  Commit files: c restores full versions; d discards selected paths' current uncommitted changes.\n  Marked commit files share one diff; unrelated files are not changed.\n  / or Ctrl+f starts live fuzzy search in the graph, branch panes and file tabs.\n  Arrows select; Enter keeps; Esc cancels.\n  Space-separated terms combine; 'term is literal; !term excludes; smart case.\n  Commit results are ranked and search loaded history only.\n\nWorking files\n  Space stage/unstage · a stage all · c commit · C editor · A amend\n  D reset menu (including submodule stashing/reset) · d discard selected paths\n  s stash with untracked · S stash options · i ignore · I show ignored\n  Grave key tree/flat · - collapse · = expand · v mark · Shift+arrows range\n  Ctrl+s file/history filters; turn off changed-only to browse clean files\n  F file history follows renames · e editor · o opener · y copy path\n  Ctrl+t configured difftool · Alt+m mergetool · M conflict menu\n\nDiff\n  ~ saves automatic previews on/off · 0 explicitly opens the full diff\n  Automatic file limit 2 MiB and output limit 512 KiB (configurable)\n  Up/down scroll within hunks · PageUp/PageDown scroll a screen\n  Left/right jump hunks · a hunk/line mode · Space stage/unstage\n  d discard selected change · [ / ] staged/unstaged · { / } context\n  H/L horizontal scroll · Ctrl+w whitespace · n/N next file or search match\n\nHistory and operations\n  Graph: g reset · t revert · C copy · V cherry-pick · F fixup · T tag\n  i interactive rebase · r/R reword/rebase editor · b bisect · y copy hash\n  Branches: n new · c checkout by name · R rename · M merge · r rebase\n  F force checkout · T tag · u upstream · w worktree · d delete\n  Stashes: Space apply · g pop · d drop · Enter diff · s save\n  p pull options · P push options · R refresh · m continue/abort/skip operation\n  : captured command with live output · ! interactive terminal command\n  A blocked command opens a popup; it is not queued.\n  Ctrl+c cancels even from the popup · End follows output\n";
