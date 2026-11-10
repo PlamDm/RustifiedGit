@@ -27,7 +27,7 @@ use std::{
     name = "rustifiedgit",
     version,
     about = "A native Rust terminal Git client",
-    long_about = "A native Rust Git TUI with your fork's repository browsing, bounded previews, file history, external tools, and live command output."
+    long_about = "A native Rust Git TUI with repository browsing, diff previews, file history, external tools, and live command output."
 )]
 struct Args {
     #[arg(short = 'p', long = "path", default_value = ".")]

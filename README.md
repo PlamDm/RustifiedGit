@@ -4,10 +4,28 @@ A keyboard-driven terminal Git client written in Rust. It provides a commit
 graph, repository and branch navigation, file and diff inspection, and common
 Git operations in one interface. Git must be available on `PATH`.
 
-## Run
+## Download
+
+Choose an asset from [GitHub Releases](https://github.com/PlamDm/RustifiedGit/releases/latest).
+Git must be installed and available on `PATH`.
+
+| Platform | Asset |
+| --- | --- |
+| Windows x64 | `rustifiedgit.exe` |
+| macOS Apple Silicon | `rustifiedgit-macos-arm64.tar.gz` |
+| macOS Intel | `rustifiedgit-macos-x86_64.tar.gz` |
+| Linux x64 (Ubuntu 22.04 or equivalent with glibc 2.35 or newer) | `rustifiedgit-linux-x86_64.tar.gz` |
+
+On Windows, open PowerShell in the download folder and run
+`.\rustifiedgit.exe -p "C:\path\to\repository"`. On macOS or Linux, extract
+the archive and run `./rustifiedgit -p /path/to/repository` in Terminal.
+Omit `-p` to open the current directory. Each release includes SHA-256 checksums.
+
+## Clone and build
 
 ```sh
-cd ~/Playground/rustifiedgit
+git clone https://github.com/PlamDm/RustifiedGit.git
+cd RustifiedGit
 cargo build --release --locked
 ./target/release/rustifiedgit -p /path/to/repository
 ```
@@ -22,7 +40,8 @@ To open the Rust project itself:
 ./target/release/rustifiedgit -p .
 ```
 
-The executable is named `rustifiedgit`.
+The executable is named `rustifiedgit` on macOS and Linux and `rustifiedgit.exe`
+on Windows.
 
 ## Numbered panes
 

@@ -3,7 +3,7 @@ name = "rustifiedgit"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
-description = "A responsive Rust terminal Git client inspired by PlamDm/pd_lazygit"
+description = "A responsive terminal Git client written in Rust"
 license = "MIT"
 
 [[bin]]

@@ -1,0 +1,89 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2022
+            target: x86_64-pc-windows-msvc
+            asset: rustifiedgit.exe
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            asset: rustifiedgit-macos-arm64.tar.gz
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            asset: rustifiedgit-macos-x86_64.tar.gz
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            asset: rustifiedgit-linux-x86_64.tar.gz
+    defaults:
+      run:
+        shell: bash
+    env:
+      RUST_TARGET: ${{ matrix.target }}
+      ASSET: ${{ matrix.asset }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Build with the pinned toolchain
+        run: |
+          rustup target add "$RUST_TARGET"
+          cargo build --release --locked --target "$RUST_TARGET"
+      - name: Smoke test and package
+        run: |
+          binary="./target/$RUST_TARGET/release/rustifiedgit"
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            binary+=".exe"
+          fi
+          test "$("$binary" --version)" = "rustifiedgit ${GITHUB_REF_NAME#v}"
+          "$binary" --use-config-dir "./target/release-smoke-config" --snapshot > /dev/null
+          mkdir -p dist
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            cp "$binary" "dist/$ASSET"
+          else
+            tar -czf "dist/$ASSET" -C "$(dirname "$binary")" rustifiedgit -C "$GITHUB_WORKSPACE" LICENSE
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: dist/${{ matrix.asset }}
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp LICENSE dist/LICENSE
+          (
+            cd dist
+            sha256sum rustifiedgit.exe rustifiedgit-*.tar.gz LICENSE > SHA256SUMS.txt
+          )
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --verify-tag --latest --title "RustifiedGit $GITHUB_REF_NAME" \
+            --notes "Download the executable for your platform from Assets. Git must be available on PATH. The README includes launch instructions and SHA256SUMS.txt contains the asset checksums."
