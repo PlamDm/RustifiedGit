@@ -284,7 +284,7 @@ impl Catalog<'_> {
                 "Tree / flat view",
                 "Switch the committed-file list between a tree and flat paths.",
             );
-            if selected && writable {
+            if selected && writable && app.comparison.is_none() {
                 self.add(
                     "commitFiles",
                     "checkoutCommitFile",
@@ -366,6 +366,11 @@ pub fn for_app(app: &App) -> Vec<Action> {
         items: Vec::new(),
     };
     let writable = app.busy.is_none();
+    catalog.add(
+        "universal", "compareRevisions", "B",
+        if app.comparison.is_some() { "Comparison options…" } else { "Compare revisions…" },
+        "Mark a commit or branch as A, then compare it with another selection; compare two names or compare a branch with its common ancestor.",
+    );
     match app.focus {
         Panel::Commits if app.graph_working_tree => {
             catalog.key(

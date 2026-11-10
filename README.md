@@ -138,6 +138,28 @@ changing commits, branches, the index or working files. The equivalent command i
 git -C /path/to/repo commit-graph write --reachable
 ```
 
+## Comparing commits and branches
+
+Press `B` or choose **Compare revisions…** from the actions menu:
+
+- For two selections, mark the first commit or branch as **A**, navigate to the
+  second, then press `B` and choose **Compare marked**. This works across the
+  graph, local branches, remote branches and tags.
+- Choose **Compare two commits / branches / tags by name…** to enter any two
+  Git revisions, such as commit hashes, `main`, `origin/feature` or `HEAD~3`.
+- On a branch, choose **Compare with base branch…** and enter its base, such
+  as `main`. This compares their common ancestor to the selected branch, showing
+  changes introduced on that branch. Use a direct comparison to compare both
+  branch tips instead.
+
+The direction is **A → B**: additions and removals describe the changes needed
+to reach B from A. Pane 6 shows the endpoints and summary; pane 7 lists changed
+files; hovering a file updates its diff in pane 0. File search and full-screen
+inspection work here too. These views are read only and do not switch branches.
+`B` also offers swapping direction and closing the comparison. `Esc` returns
+from a full-screen diff to its files; another `Esc` closes the comparison.
+Focusing the graph with `5` also returns to normal commit inspection.
+
 ## Repository workflows
 
 - The full repository file view includes unchanged tracked files, dimmed with their clean directories.

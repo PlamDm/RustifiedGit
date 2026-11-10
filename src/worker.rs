@@ -1,7 +1,10 @@
 use crate::{
     config::GuiConfig,
     git::{Operation, ReadOptions, Repository},
-    model::{Commit, CommitInspection, FileEntry, Preview, PreviewTarget, Reference, Snapshot},
+    model::{
+        Commit, CommitInspection, ComparisonRequest, ComparisonResult, FileEntry, Preview,
+        PreviewTarget, Reference, Snapshot,
+    },
     process::Cancellation,
 };
 use std::{
@@ -87,6 +90,7 @@ pub enum WorkerEvent {
     History(u64, Result<HistoryPage, String>),
     Preview(u64, Result<Preview, String>),
     CommitFiles(u64, String, Result<CommitInspection, String>),
+    Comparison(u64, Result<ComparisonResult, String>),
     HeadTree(u64, String, Result<Vec<FileEntry>, String>),
     CommandDone(Result<String, String>),
 }
@@ -107,6 +111,7 @@ pub struct Workers {
     pub history: Latest<ReadOptions>,
     pub preview: Latest<PreviewRequest>,
     pub commit_files: Latest<String>,
+    pub comparison: Latest<ComparisonRequest>,
     pub head_tree: Latest<String>,
     pub commands: Sender<CommandRequest>,
     pub events: Receiver<WorkerEvent>,
@@ -182,6 +187,18 @@ impl Workers {
                 let _ = files_events.send(WorkerEvent::CommitFiles(id, oid, result));
             }
         });
+        let comparison_repo = repo.clone();
+        let comparison_events = events.clone();
+        let comparison = Latest::spawn(
+            move |id, request: ComparisonRequest, cancel: Cancellation| {
+                let result = comparison_repo
+                    .compare(&request, &cancel)
+                    .map_err(|error| format!("{error:#}"));
+                if !cancel.is_cancelled() {
+                    let _ = comparison_events.send(WorkerEvent::Comparison(id, result));
+                }
+            },
+        );
         let (commands, command_receiver) = mpsc::channel::<CommandRequest>();
         let tree_repo = repo.clone();
         let tree_events = events.clone();
@@ -213,6 +230,7 @@ impl Workers {
             history,
             preview,
             commit_files,
+            comparison,
             head_tree,
             commands,
             events: receiver,

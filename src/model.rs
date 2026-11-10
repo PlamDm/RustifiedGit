@@ -96,6 +96,59 @@ pub struct CommitInspection {
     pub files: Vec<FileEntry>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Revision {
+    pub name: String,
+    pub revision: String,
+}
+
+impl Revision {
+    pub fn named(name: String) -> Self {
+        Self {
+            revision: name.clone(),
+            name,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ComparisonRequest {
+    pub from: Revision,
+    pub to: Revision,
+    pub merge_base: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct ComparisonInfo {
+    pub request: ComparisonRequest,
+    pub from_oid: String,
+    pub to_oid: String,
+    pub merge_base_oid: Option<String>,
+    pub summary: String,
+}
+
+impl ComparisonInfo {
+    pub fn diff_base(&self) -> &str {
+        self.merge_base_oid.as_deref().unwrap_or(&self.from_oid)
+    }
+    pub fn title(&self) -> String {
+        if self.request.merge_base {
+            format!(
+                "{} since base {}",
+                self.request.to.name, self.request.from.name
+            )
+        } else {
+            format!("{} → {}", self.request.from.name, self.request.to.name)
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ComparisonResult {
+    pub info: ComparisonInfo,
+    pub files: Vec<FileEntry>,
+}
+
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct Stash {
     pub reference: String,
@@ -129,6 +182,12 @@ pub struct Snapshot {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PreviewTarget {
+    Comparison {
+        from: String,
+        to: String,
+        path: PathBuf,
+        old_path: Option<PathBuf>,
+    },
     TreeFile {
         path: PathBuf,
         oid: String,

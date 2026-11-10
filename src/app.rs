@@ -4,7 +4,10 @@ use crate::{
     config::{Config, CustomCommand, MAX_HISTORY_PAGE_SIZE, State, key_matches},
     git::{Operation, ReadOptions, Repository, Step, discard_operation, stage_operation},
     history::{CommitOrder, GraphIndex},
-    model::{CommitDetails, FileEntry, Panel, Preview, PreviewTarget, RefKind, Snapshot},
+    model::{
+        CommitDetails, ComparisonInfo, ComparisonRequest, FileEntry, Panel, Preview, PreviewTarget,
+        RefKind, Revision, Snapshot,
+    },
     patch::Patch,
     process::{Cancellation, CommandSpec},
     tree::{self, Row, fuzzy_match},
@@ -34,6 +37,9 @@ pub enum Prompt {
     Shell(bool),
     HistoryPath,
     HistoryLimit,
+    CompareFrom,
+    CompareTo(Revision),
+    CompareBase(Revision),
     Worktree(String),
     Custom {
         command: CustomCommand,
@@ -58,6 +64,10 @@ pub enum MenuAction {
     ToggleUnchanged,
     ToggleFilter,
     Copy(String),
+    CompareMark(Revision),
+    Compare(ComparisonRequest),
+    CompareClose,
+    CompareUnmark,
 }
 
 #[derive(Clone)]
@@ -126,6 +136,9 @@ pub struct App {
     pub commit_rows: Vec<Row>,
     pub commit_files: Vec<FileEntry>,
     pub commit_oid: String,
+    pub comparison: Option<ComparisonInfo>,
+    pub comparison_loading: bool,
+    pub comparison_mark: Option<Revision>,
     pub head_tree_tab: bool,
     pub head_files: Vec<FileEntry>,
     pub head_rows: Vec<Row>,
@@ -254,6 +267,9 @@ impl App {
             commit_rows: Vec::new(),
             commit_files: Vec::new(),
             commit_oid: String::new(),
+            comparison: None,
+            comparison_loading: false,
+            comparison_mark: None,
             head_tree_tab: false,
             head_files: Vec::new(),
             head_rows: Vec::new(),
@@ -333,7 +349,7 @@ impl App {
     pub fn file_panel(&self) -> Panel {
         if self.head_tree_tab {
             Panel::HeadFiles
-        } else if self.graph_working_tree {
+        } else if self.graph_working_tree && self.comparison.is_none() {
             Panel::Files
         } else {
             Panel::CommitFiles
@@ -473,8 +489,184 @@ impl App {
         self.preview_key = None;
         self.request_preview(false);
     }
+
+    fn comparison_revision(&self) -> Option<Revision> {
+        if matches!(self.focus, Panel::Branches | Panel::RemoteBranches) {
+            return self.selected_ref().map(|reference| Revision {
+                name: reference.name.clone(),
+                revision: reference.oid.clone(),
+            });
+        }
+        if self.focus != Panel::Commits {
+            if let Some(comparison) = &self.comparison {
+                return Some(Revision {
+                    name: comparison.request.to.name.clone(),
+                    revision: comparison.to_oid.clone(),
+                })
+                .filter(|revision| !revision.revision.is_empty());
+            }
+        }
+        self.selected_commit()
+            .map(|commit| Revision {
+                name: commit.short.clone(),
+                revision: commit.oid.clone(),
+            })
+            .or_else(|| {
+                (!self.snapshot.head.is_empty()).then(|| Revision {
+                    name: "HEAD".into(),
+                    revision: self.snapshot.head.clone(),
+                })
+            })
+    }
+
+    fn comparison_menu(&mut self) {
+        let selected = self.comparison_revision();
+        let mut items = Vec::new();
+        if let (Some(from), Some(to)) = (&self.comparison_mark, &selected) {
+            items.push(MenuItem {
+                label: format!("Compare marked {} → {}", from.name, to.name),
+                action: MenuAction::Compare(ComparisonRequest {
+                    from: from.clone(),
+                    to: to.clone(),
+                    merge_base: false,
+                }),
+            });
+        }
+        if let Some(to) = selected {
+            items.push(MenuItem {
+                label: format!("Mark {} as comparison start (A)", to.name),
+                action: MenuAction::CompareMark(to.clone()),
+            });
+            if !self.snapshot.head.is_empty() {
+                items.push(MenuItem {
+                    label: format!("Compare HEAD → {}", to.name),
+                    action: MenuAction::Compare(ComparisonRequest {
+                        from: Revision {
+                            name: "HEAD".into(),
+                            revision: self.snapshot.head.clone(),
+                        },
+                        to: to.clone(),
+                        merge_base: false,
+                    }),
+                });
+            }
+            items.push(MenuItem {
+                label: format!(
+                    "Compare {} with base branch… (common ancestor → selected)",
+                    to.name
+                ),
+                action: MenuAction::Input(Prompt::CompareBase(to)),
+            });
+        }
+        items.push(MenuItem {
+            label: "Compare two commits / branches / tags by name…".into(),
+            action: MenuAction::Input(Prompt::CompareFrom),
+        });
+        if let Some(info) = &self.comparison {
+            if !self.comparison_loading {
+                items.push(MenuItem {
+                    label: "Swap comparison direction".into(),
+                    action: MenuAction::Compare(ComparisonRequest {
+                        from: Revision {
+                            name: info.request.to.name.clone(),
+                            revision: info.to_oid.clone(),
+                        },
+                        to: Revision {
+                            name: info.request.from.name.clone(),
+                            revision: info.from_oid.clone(),
+                        },
+                        merge_base: info.request.merge_base,
+                    }),
+                });
+            }
+            items.push(MenuItem {
+                label: "Close comparison".into(),
+                action: MenuAction::CompareClose,
+            });
+        }
+        if self.comparison_mark.is_some() {
+            items.push(MenuItem {
+                label: "Clear marked comparison start".into(),
+                action: MenuAction::CompareUnmark,
+            });
+        }
+        self.menu(
+            "Compare revisions · A → B shows changes needed to reach B",
+            items,
+        );
+    }
+
+    pub fn start_comparison(&mut self, request: ComparisonRequest) {
+        self.workers.commit_files.cancel();
+        self.workers.preview.cancel();
+        self.inspection_oid = None;
+        self.inspection_loading = false;
+        self.commit_details = None;
+        self.commit_oid.clear();
+        self.commit_files.clear();
+        self.commit_rows.clear();
+        self.searches[7].clear();
+        self.selections[7] = 0;
+        self.scrolls[7] = 0;
+        self.scrolls[9] = 0;
+        self.head_tree_tab = false;
+        self.fullscreen = false;
+        self.comparison = Some(ComparisonInfo {
+            request: request.clone(),
+            from_oid: String::new(),
+            to_oid: String::new(),
+            merge_base_oid: None,
+            summary: "Loading comparison…".into(),
+        });
+        self.comparison_loading = true;
+        self.workers.comparison.submit(request);
+        self.update_details();
+        self.set_focus(Panel::CommitFiles);
+    }
+
+    pub fn close_comparison(&mut self) {
+        if self.comparison.take().is_none() {
+            return;
+        }
+        self.workers.comparison.cancel();
+        self.workers.preview.cancel();
+        self.comparison_loading = false;
+        self.inspection_oid = None;
+        self.commit_files.clear();
+        self.commit_rows.clear();
+        self.head_tree_tab = false;
+        self.fullscreen = false;
+        self.focus = Panel::Commits;
+        self.sync_inspection();
+        self.preview_key = None;
+        self.request_preview(false);
+        self.dirty = true;
+    }
+
     fn update_details(&mut self) {
-        self.details_lines = if self.graph_working_tree {
+        self.details_lines = if let Some(info) = &self.comparison {
+            let mut lines = vec![
+                format!("Comparison: {}", info.title()),
+                String::new(),
+                format!("From: {}", info.request.from.name),
+                format!("To: {}", info.request.to.name),
+            ];
+            if !self.comparison_loading {
+                lines.push(format!("From commit: {}", info.from_oid));
+                lines.push(format!("To commit: {}", info.to_oid));
+                if let Some(base) = &info.merge_base_oid {
+                    lines.push(format!("Common ancestor: {base}"));
+                }
+                lines.push(format!("{} changed files", self.commit_files.len()));
+            }
+            lines.extend([
+                String::new(),
+                info.summary.clone(),
+                String::new(),
+                "7 files · 0 diff · B comparison options · Esc close".into(),
+            ]);
+            lines
+        } else if self.graph_working_tree {
             vec![
                 "Working tree / Index".into(),
                 String::new(),
@@ -567,6 +759,17 @@ impl App {
         .collect()
     }
     fn sync_inspection(&mut self) {
+        if self.comparison.is_some() {
+            if self.focus != Panel::Stash {
+                self.side = if self.head_tree_tab {
+                    Panel::HeadFiles
+                } else {
+                    Panel::CommitFiles
+                };
+            }
+            self.update_details();
+            return;
+        }
         if !self.graph_working_tree && self.selected_commit().is_none() {
             self.graph_working_tree = true;
         }
@@ -644,6 +847,7 @@ impl App {
         }
     }
     pub fn select_graph_row(&mut self, logical_index: usize) {
+        self.close_comparison();
         self.focus = Panel::Commits;
         let worktree_index = self.working_tree_graph_index();
         self.graph_working_tree = logical_index == worktree_index;
@@ -1062,6 +1266,23 @@ impl App {
     }
 
     fn target(&self) -> Option<PreviewTarget> {
+        if self.side == Panel::CommitFiles {
+            if let Some(info) = &self.comparison {
+                if self.comparison_loading {
+                    return None;
+                }
+                let row = self.row()?;
+                let file = row
+                    .file_index
+                    .and_then(|index| self.commit_files.get(index));
+                return Some(PreviewTarget::Comparison {
+                    from: info.diff_base().into(),
+                    to: info.to_oid.clone(),
+                    path: row.path.clone(),
+                    old_path: file.and_then(|file| file.old_path.clone()),
+                });
+            }
+        }
         match self.side {
             Panel::HeadFiles => {
                 let row = self.row()?;
@@ -1110,12 +1331,22 @@ impl App {
             self.workers.preview.cancel();
             self.preview_loading = false;
             self.preview_key = None;
-            self.preview_lines = vec!["No selection".into()];
+            self.preview_lines = vec![
+                if self.comparison_loading {
+                    "Loading comparison…"
+                } else if self.comparison.is_some() && self.commit_files.is_empty() {
+                    "No differences between these revisions."
+                } else {
+                    "No selection"
+                }
+                .into(),
+            ];
             self.preview = Preview::default();
             self.patch = Patch::default();
             self.dirty = true;
             return;
         };
+        let explicit = explicit || matches!(target, PreviewTarget::Comparison { .. });
         if !explicit
             && !self.state.diff_preview_enabled
             && matches!(
@@ -1229,6 +1460,25 @@ impl App {
                             if self.modal.is_none() && self.search_edit.is_none() {
                                 self.error(message);
                             }
+                        }
+                    }
+                }
+                WorkerEvent::Comparison(id, result)
+                    if id == self.workers.comparison.current() && self.comparison.is_some() =>
+                {
+                    self.comparison_loading = false;
+                    match result {
+                        Ok(result) => {
+                            self.comparison = Some(result.info);
+                            self.commit_files = result.files;
+                            self.rebuild_commit_rows();
+                            self.update_details();
+                            self.preview_key = None;
+                            self.request_preview(false);
+                        }
+                        Err(error) => {
+                            self.close_comparison();
+                            self.error(format!("Comparison failed: {error}"));
                         }
                     }
                 }
@@ -1417,6 +1667,9 @@ impl App {
         }
     }
     pub fn set_focus(&mut self, panel: Panel) {
+        if panel == Panel::Commits {
+            self.close_comparison();
+        }
         if self
             .search_edit
             .as_ref()
@@ -1753,6 +2006,19 @@ impl App {
                 self.rebuild();
             }
             MenuAction::Copy(text) => self.copy(text),
+            MenuAction::CompareMark(revision) => {
+                self.notice = format!(
+                    "Comparison start: {} · select another revision, then B → Compare marked",
+                    revision.name
+                );
+                self.comparison_mark = Some(revision);
+            }
+            MenuAction::Compare(request) => self.start_comparison(request),
+            MenuAction::CompareClose => self.close_comparison(),
+            MenuAction::CompareUnmark => {
+                self.comparison_mark = None;
+                self.notice = "Comparison start cleared".into();
+            }
         }
     }
 
@@ -1772,6 +2038,9 @@ impl App {
             Prompt::HistoryLimit => {
                 "Commit initial/page size (1–1,000,000; automatic paging stays on)"
             }
+            Prompt::CompareFrom => "Compare from (A): commit, branch or tag",
+            Prompt::CompareTo(_) => "Compare to (B): commit, branch or tag",
+            Prompt::CompareBase(_) => "Base branch: compare common ancestor → selected revision",
             Prompt::Worktree(_) => "New worktree path",
             Prompt::Custom { command, index, .. } => command
                 .prompts
@@ -1791,6 +2060,21 @@ impl App {
                 .unwrap_or_default(),
             Prompt::RenameBranch(name) => name.clone(),
             Prompt::HistoryLimit => self.history_page_size().to_string(),
+            Prompt::CompareFrom => "HEAD".into(),
+            Prompt::CompareTo(_) => self
+                .comparison_revision()
+                .map(|revision| revision.name)
+                .unwrap_or_else(|| "HEAD".into()),
+            Prompt::CompareBase(_) => ["main", "master", "origin/main", "origin/master"]
+                .into_iter()
+                .find(|name| {
+                    self.snapshot
+                        .references
+                        .iter()
+                        .any(|reference| reference.name == *name)
+                })
+                .unwrap_or("HEAD")
+                .into(),
             _ => String::new(),
         };
         self.prompt(title, purpose, text);
@@ -1813,6 +2097,32 @@ impl App {
                     }
                     self.request_preview(false);
                 }
+            }
+            Prompt::CompareFrom => {
+                if text.trim().is_empty() {
+                    bail!("Enter the starting revision");
+                }
+                self.prompt_for(Prompt::CompareTo(Revision::named(text.trim().into())));
+            }
+            Prompt::CompareTo(from) => {
+                if text.trim().is_empty() {
+                    bail!("Enter the target revision");
+                }
+                self.start_comparison(ComparisonRequest {
+                    from,
+                    to: Revision::named(text.trim().into()),
+                    merge_base: false,
+                });
+            }
+            Prompt::CompareBase(to) => {
+                if text.trim().is_empty() {
+                    bail!("Enter a base branch or commit");
+                }
+                self.start_comparison(ComparisonRequest {
+                    from: Revision::named(text.trim().into()),
+                    to,
+                    merge_base: true,
+                });
             }
             Prompt::Commit(amend) => {
                 if text.trim().is_empty() {
@@ -2138,6 +2448,8 @@ impl App {
             if self.focus == Panel::Diff {
                 self.fullscreen = false;
                 self.set_focus(self.side);
+            } else if self.comparison.is_some() && self.search(self.focus).is_empty() {
+                self.close_comparison();
             } else if matches!(self.focus, Panel::CommitFiles | Panel::HeadFiles)
                 && self.search(self.focus).is_empty()
             {
@@ -2200,6 +2512,10 @@ impl App {
                 items: actions::for_app(self),
                 selected: 0,
             });
+            return Ok(());
+        }
+        if self.is("universal", "compareRevisions", &["B"], key) {
+            self.comparison_menu();
             return Ok(());
         }
         for (number, panel) in [
@@ -2415,7 +2731,7 @@ impl App {
                     self.refresh();
                 }
                 Panel::Diff => {
-                    if self.side != Panel::HeadFiles {
+                    if self.side != Panel::HeadFiles && self.comparison.is_none() {
                         self.show_staged = !self.show_staged;
                         self.preview_key = None;
                         self.request_preview(true);
@@ -2735,6 +3051,11 @@ impl App {
         } else if key_matches("o", key) {
             self.open_file()?;
         } else if self.is("commitFiles", "checkoutCommitFile", &["c"], key) {
+            if self.comparison.is_some() {
+                bail!(
+                    "Comparison files are read only. Close the comparison before restoring a commit's file."
+                );
+            }
             if let Some(row) = self.row() {
                 let args = vec![
                     "restore".into(),
@@ -3410,10 +3731,14 @@ impl App {
             "--no-prompt".into(),
         ];
         if !merge && self.side == Panel::CommitFiles {
-            args.extend([
-                format!("{}^", self.commit_oid).into(),
-                self.commit_oid.clone().into(),
-            ]);
+            if let Some(info) = &self.comparison {
+                args.extend([info.diff_base().into(), info.to_oid.clone().into()]);
+            } else {
+                args.extend([
+                    format!("{}^", self.commit_oid).into(),
+                    self.commit_oid.clone().into(),
+                ]);
+            }
         } else if !merge && self.preview.staged {
             args.push("--cached".into());
         }

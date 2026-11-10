@@ -1,8 +1,9 @@
 use crate::{
     config::GuiConfig,
     model::{
-        Commit, CommitDetails, CommitInspection, FileEntry, Preview, PreviewTarget, RefKind,
-        Reference, Snapshot, Stash, Worktree,
+        Commit, CommitDetails, CommitInspection, ComparisonInfo, ComparisonRequest,
+        ComparisonResult, FileEntry, Preview, PreviewTarget, RefKind, Reference, Snapshot, Stash,
+        Worktree,
     },
     process::{self, Cancellation, CommandSpec, Output, os_path},
 };
@@ -111,6 +112,34 @@ impl Operation {
 
 fn without_newline(bytes: &[u8]) -> &[u8] {
     bytes.strip_suffix(b"\n").unwrap_or(bytes)
+}
+
+fn parse_changed_files(bytes: &[u8]) -> Vec<FileEntry> {
+    let fields: Vec<_> = bytes
+        .split(|byte| *byte == 0)
+        .filter(|field| !field.is_empty())
+        .collect();
+    let mut result = Vec::new();
+    let mut index = 0;
+    while index + 1 < fields.len() {
+        let status = fields[index].first().copied().unwrap_or(b' ');
+        let path = fields[index + 1];
+        index += 2;
+        let (old_path, path) = if matches!(status, b'R' | b'C') && index < fields.len() {
+            let new = fields[index];
+            index += 1;
+            (Some(PathBuf::from(os_path(path))), new)
+        } else {
+            (None, path)
+        };
+        result.push(FileEntry {
+            path: PathBuf::from(os_path(path)),
+            old_path,
+            index: status,
+            worktree: b' ',
+        });
+    }
+    result
 }
 
 fn history_output_error(output: &Output, requested: usize) -> Option<anyhow::Error> {
@@ -836,6 +865,39 @@ impl Repository {
             }
         }
         match target {
+            PreviewTarget::Comparison {
+                from,
+                to,
+                path,
+                old_path,
+            } => {
+                title = format!(
+                    "{} · {} → {}",
+                    path.display(),
+                    &from[..from.len().min(8)],
+                    &to[..to.len().min(8)]
+                );
+                args.extend([
+                    "diff".into(),
+                    "--no-color".into(),
+                    "--no-ext-diff".into(),
+                    "--no-textconv".into(),
+                    "--find-renames".into(),
+                    format!("--unified={context}").into(),
+                ]);
+                if ignore_whitespace {
+                    args.push("--ignore-all-space".into());
+                }
+                args.extend([
+                    from.into(),
+                    to.into(),
+                    "--".into(),
+                    path.as_os_str().to_owned(),
+                ]);
+                if let Some(old_path) = old_path {
+                    args.push(old_path.as_os_str().to_owned());
+                }
+            }
             PreviewTarget::TreeFile { path, oid } => {
                 return self.tree_file_preview(path, oid, explicit, settings, cancel);
             }
@@ -1031,32 +1093,103 @@ impl Repository {
             ],
             cancel,
         )?;
-        let fields: Vec<_> = output
-            .stdout
-            .split(|byte| *byte == 0)
-            .filter(|field| !field.is_empty())
-            .collect();
-        let mut result = Vec::new();
-        let mut index = 0;
-        while index + 1 < fields.len() {
-            let status = fields[index].first().copied().unwrap_or(b' ');
-            let path = fields[index + 1];
-            index += 2;
-            let (old_path, path) = if matches!(status, b'R' | b'C') && index < fields.len() {
-                let new = fields[index];
-                index += 1;
-                (Some(PathBuf::from(os_path(path))), new)
-            } else {
-                (None, path)
-            };
-            result.push(FileEntry {
-                path: PathBuf::from(os_path(path)),
-                old_path,
-                index: status,
-                worktree: b' ',
-            });
-        }
-        Ok(result)
+        Ok(parse_changed_files(&output.stdout))
+    }
+
+    pub fn compare(
+        &self,
+        request: &ComparisonRequest,
+        cancel: &Cancellation,
+    ) -> Result<ComparisonResult> {
+        let resolve = |revision: &str| -> Result<String> {
+            if revision.trim().is_empty() {
+                bail!("Enter a commit, branch or tag");
+            }
+            Ok(self
+                .read(
+                    [
+                        "rev-parse",
+                        "--verify",
+                        "--end-of-options",
+                        &format!("{}^{{commit}}", revision.trim()),
+                    ],
+                    cancel,
+                )?
+                .text()
+                .trim()
+                .to_owned())
+        };
+        let from_oid = resolve(&request.from.revision)?;
+        let to_oid = resolve(&request.to.revision)?;
+        let merge_base_oid = if request.merge_base {
+            let output = process::run(
+                &self.root,
+                &CommandSpec::git(["merge-base", "--all", &from_oid, &to_oid]),
+                cancel,
+                READ_LIMIT,
+                None,
+                READ_TIMEOUT,
+            )?;
+            if output.code == 1 {
+                bail!("These revisions have no common ancestor. Use a direct comparison instead.");
+            }
+            let output = output.success()?;
+            let text = output.text();
+            let bases: Vec<_> = text.split_whitespace().collect();
+            if bases.len() != 1 {
+                bail!(
+                    "These revisions have multiple common ancestors. Use a direct comparison to choose an explicit base."
+                );
+            }
+            Some(bases[0].to_owned())
+        } else {
+            None
+        };
+        let base = merge_base_oid.as_deref().unwrap_or(&from_oid);
+        let files = self.read(
+            [
+                "diff",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--name-status",
+                "-z",
+                "--find-renames",
+                base,
+                &to_oid,
+                "--",
+            ],
+            cancel,
+        )?;
+        let summary = self
+            .read(
+                [
+                    "diff",
+                    "--no-ext-diff",
+                    "--no-textconv",
+                    "--shortstat",
+                    base,
+                    &to_oid,
+                    "--",
+                ],
+                cancel,
+            )?
+            .text()
+            .trim()
+            .to_owned();
+        Ok(ComparisonResult {
+            info: ComparisonInfo {
+                request: request.clone(),
+                from_oid,
+                to_oid,
+                merge_base_oid,
+                summary: if summary.is_empty() {
+                    "No differences.".into()
+                } else {
+                    summary
+                },
+            },
+            files: parse_changed_files(&files.stdout),
+        })
     }
 
     pub fn inspect_commit(&self, oid: &str, cancel: &Cancellation) -> Result<CommitInspection> {
