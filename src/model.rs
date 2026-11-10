@@ -182,6 +182,10 @@ pub struct Snapshot {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PreviewTarget {
+    CommitFiles {
+        oid: String,
+        paths: Vec<PathBuf>,
+    },
     Comparison {
         from: String,
         to: String,
@@ -256,7 +260,7 @@ impl Panel {
             Self::Commits => 5,
             Self::Stash => 4,
             Self::Details => 6,
-            Self::Output => 8,
+            Self::Output => 6,
             _ => 0,
         }
     }

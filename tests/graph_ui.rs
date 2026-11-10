@@ -126,6 +126,7 @@ fn numbered_panes_and_tab_order_cover_the_layout() {
         assert_eq!(app.focus, panel);
         key(&mut app, KeyCode::Tab);
     }
+    app.set_focus(Panel::Details);
     key(&mut app, KeyCode::Char('1'));
     for panel in [
         Panel::Branches,
@@ -135,7 +136,6 @@ fn numbered_panes_and_tab_order_cover_the_layout() {
         Panel::Details,
         Panel::Files,
         Panel::Diff,
-        Panel::Output,
         Panel::Status,
     ] {
         key(&mut app, KeyCode::Tab);
@@ -174,7 +174,7 @@ fn numbered_panes_and_tab_order_cover_the_layout() {
         "3 Remote branches",
         "4 Stashes",
         "5 Commit graph",
-        "6 Commit details",
+        "6 [Details] | Output",
         "7 [Changes] | HEAD tree",
         "0 Diff",
     ] {
@@ -305,7 +305,8 @@ fn graph_navigation_loads_message_files_and_diff_without_stealing_focus() {
         .skip(rect.x as usize)
         .take(rect.width as usize)
         .collect();
-    assert!(commit_row.contains("Main commit"), "{commit_row}");
+    assert!(commit_row.contains("[main, origin/"), "{commit_row}");
+    assert!(!commit_row.contains("Main commit"), "{commit_row}");
     key(&mut app, KeyCode::Char('7'));
     assert_eq!(app.focus, Panel::CommitFiles);
     key(&mut app, KeyCode::Enter);
@@ -648,15 +649,15 @@ fn history_acceleration_builds_only_git_metadata() {
 }
 
 #[test]
-fn commit_rows_reserve_the_right_edge_for_committer_initials_and_date() {
+fn commit_rows_reserve_the_right_edge_for_committer_initials_and_timestamp() {
     use std::sync::Arc;
     let (_dir, mut app, _) = fixture();
     let snapshot = Arc::make_mut(&mut app.snapshot);
     let commit = &mut Arc::make_mut(&mut snapshot.commits)[0];
     commit.author = "Other Author".into();
-    commit.date = "1999-02-01T00:00:00Z".into();
+    commit.date = "1999-02-01T04:07:58Z".into();
     commit.committer = "Jane Mary Smith".into();
-    commit.committed_at = "2026-11-26T12:00:00+02:00".into();
+    commit.committed_at = "2026-11-26T12:34:56+02:00".into();
     commit.subject = "修复 Unicode columns and a very long commit message ".repeat(8);
     for (width, height) in [(80, 24), (120, 34), (180, 46)] {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
@@ -666,10 +667,166 @@ fn commit_rows_reserve_the_right_edge_for_committer_initials_and_date() {
         let line: String = (rect.x + 1..rect.right() - 1)
             .map(|x| buffer[(x, rect.y + 2)].symbol())
             .collect();
-        assert!(line.ends_with("JS 26 Nov 2026"), "{width}: {line}");
+        assert!(line.ends_with("JS 26 Nov 2026 12:34"), "{width}: {line}");
         assert!(line.contains('…'), "{width}: {line}");
         assert!(!line.contains("1999"));
     }
+    let snapshot = Arc::make_mut(&mut app.snapshot);
+    let commit = &mut Arc::make_mut(&mut snapshot.commits)[0];
+    commit.committer.clear();
+    commit.committed_at.clear();
+    let text = screen(&mut app, 140, 40);
+    assert!(text.contains("OA 01 Feb 1999 04:07"), "{text}");
+}
+
+#[test]
+fn commit_rows_prioritize_all_branch_and_tag_labels_over_the_subject() {
+    let (_dir, mut app, _) = fixture();
+    git(&app.repo.root, &["branch", "release/stable"]);
+    git(
+        &app.repo.root,
+        &["update-ref", "refs/remotes/origin/main", "HEAD"],
+    );
+    git(&app.repo.root, &["tag", "v1.0"]);
+    git(&app.repo.root, &["tag", "-am", "Release", "v2.0"]);
+    app.refresh();
+    wait(&mut app, |app| !app.loading);
+    let snapshot = std::sync::Arc::make_mut(&mut app.snapshot);
+    let commit = &mut std::sync::Arc::make_mut(&mut snapshot.commits)[0];
+    commit.subject = "A very long commit subject ".repeat(20);
+    app.fullscreen = true;
+    for width in [140, 80] {
+        let text = screen(&mut app, width, 40);
+        let rect = ui::areas(Rect::new(0, 0, width, 40), &app).graph;
+        let line = text.lines().nth((rect.y + 2) as usize).unwrap();
+        assert!(line.contains("[main,"), "{width}: {line}");
+        assert!(line.contains('…'), "{width}: {line}");
+        if width == 140 {
+            for label in ["release/stable", "origin/main", "tag: v1.0", "tag: v2.0"] {
+                assert!(line.contains(label), "{width}: missing {label}: {line}");
+            }
+            assert!(line.contains("] A very long"), "{line}");
+        } else {
+            assert!(line.contains("…]"), "{line}");
+            assert!(!line.contains("A very long"), "{line}");
+        }
+    }
+}
+
+#[test]
+fn commit_file_selection_previews_cherry_picks_and_discards_only_selected_paths() {
+    let (_dir, mut app, _) = fixture();
+    let root = app.repo.root.clone();
+    git(&root, &["config", "core.autocrlf", "false"]);
+    let head = git(&root, &["rev-parse", "HEAD"]);
+    git(&root, &["switch", "-qc", "pick-files"]);
+    fs::create_dir_all(root.join("nested/deep")).unwrap();
+    fs::write(root.join("nested/deep/a.txt"), "picked a\n").unwrap();
+    fs::write(root.join("nested/deep/b.txt"), "picked b\n").unwrap();
+    fs::write(root.join("unpicked.txt"), "must not be picked\n").unwrap();
+    git(&root, &["add", "--all"]);
+    git(&root, &["commit", "-qm", "Selected file source"]);
+    let source = git(&root, &["rev-parse", "HEAD"]);
+    git(&root, &["switch", "-q", "main"]);
+    fs::write(root.join("main.txt"), "keep working changes\n").unwrap();
+    fs::write(root.join("keep.txt"), "keep untracked\n").unwrap();
+    app.options.visible_refs = Some(vec![
+        "refs/heads/main".into(),
+        "refs/heads/pick-files".into(),
+    ]);
+    app.refresh();
+    wait(&mut app, |app| !app.loading);
+    let selected = app
+        .filtered_commits()
+        .iter()
+        .position(|index| app.snapshot.commits[*index].oid == source)
+        .unwrap();
+    app.select_graph_row(app.commit_graph_row(selected));
+    wait(&mut app, |app| !app.inspection_loading);
+    key(&mut app, KeyCode::Char('7'));
+    let folder = app
+        .commit_rows
+        .iter()
+        .position(|row| row.path == Path::new("nested"))
+        .unwrap();
+    app.select_list_row(Panel::CommitFiles, folder);
+    app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT));
+    assert_eq!(app.marked_commit_files.len(), 2);
+    assert!(app.file_is_marked(Path::new("nested/deep/a.txt")));
+    wait(&mut app, |app| !app.preview_loading);
+    assert!(app.preview.text.contains("+picked a"));
+    assert!(app.preview.text.contains("+picked b"));
+    assert!(!app.preview.text.contains("must not be picked"));
+    let text = screen(&mut app, 160, 45);
+    assert!(text.contains("●"), "{text}");
+    key(&mut app, KeyCode::Esc);
+    assert!(app.marked_commit_files.is_empty());
+    assert_eq!(app.focus, Panel::CommitFiles);
+    app.select_list_row(Panel::CommitFiles, folder);
+    key(&mut app, KeyCode::Char('*'));
+    assert!(app.collapsed.contains(Path::new("nested")));
+    assert!(app.collapsed.contains(Path::new("nested/deep")));
+    assert!(
+        !app.commit_rows
+            .iter()
+            .any(|row| row.path == Path::new("nested/deep/a.txt"))
+    );
+    key(&mut app, KeyCode::Char('*'));
+    assert!(
+        app.commit_rows
+            .iter()
+            .any(|row| row.path == Path::new("nested/deep/a.txt"))
+    );
+    app.select_list_row(Panel::CommitFiles, folder);
+    key(&mut app, KeyCode::Char('v'));
+    key(&mut app, KeyCode::Char('0'));
+    key(&mut app, KeyCode::Esc);
+    assert_eq!(app.focus, Panel::CommitFiles);
+    assert!(app.marked_commit_files.is_empty());
+    key(&mut app, KeyCode::Char('v'));
+    key(&mut app, KeyCode::Char('V'));
+    assert!(matches!(
+        app.modal,
+        Some(rustifiedgit::app::Modal::Confirm { .. })
+    ));
+    key(&mut app, KeyCode::Enter);
+    wait(&mut app, |app| app.busy.is_none() && !app.loading);
+    assert_eq!(git(&root, &["rev-parse", "HEAD"]), head);
+    assert_eq!(
+        fs::read_to_string(root.join("nested/deep/a.txt")).unwrap(),
+        "picked a\n"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("nested/deep/b.txt")).unwrap(),
+        "picked b\n"
+    );
+    assert!(!root.join("unpicked.txt").exists());
+    assert_eq!(
+        git(&root, &["diff", "--cached", "--name-only"]),
+        "nested/deep/a.txt\nnested/deep/b.txt"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("main.txt")).unwrap(),
+        "keep working changes\n"
+    );
+    key(&mut app, KeyCode::Char('d'));
+    assert!(matches!(
+        app.modal,
+        Some(rustifiedgit::app::Modal::Confirm { .. })
+    ));
+    key(&mut app, KeyCode::Enter);
+    wait(&mut app, |app| app.busy.is_none() && !app.loading);
+    assert!(!root.join("nested/deep/a.txt").exists());
+    assert!(!root.join("nested/deep/b.txt").exists());
+    assert_eq!(
+        fs::read_to_string(root.join("main.txt")).unwrap(),
+        "keep working changes\n"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("keep.txt")).unwrap(),
+        "keep untracked\n"
+    );
+    assert!(git(&root, &["diff", "--cached", "--name-only"]).is_empty());
 }
 
 #[test]

@@ -287,12 +287,45 @@ impl Catalog<'_> {
             if selected && writable && app.comparison.is_none() {
                 self.add(
                     "commitFiles",
+                    "cherryPickFiles",
+                    "V",
+                    "Cherry-pick selected files…",
+                    "Apply only the selected commit-file changes to the working tree and index, without committing.",
+                );
+                self.add(
+                    "universal",
+                    "remove",
+                    "d",
+                    "Discard selected working changes…",
+                    "Confirm discarding current uncommitted changes only for the selected commit paths.",
+                );
+                self.add(
+                    "commitFiles",
                     "checkoutCommitFile",
                     "c",
                     "Restore committed file…",
                     "Confirm restoring this commit's version into the working tree.",
                 );
             }
+            self.key(
+                "v",
+                "Mark / unmark",
+                "Toggle this path in the multiple-file selection.",
+            );
+            self.add(
+                "files",
+                "collapseAll",
+                "-",
+                "Collapse directories",
+                "Collapse all commit-file directories.",
+            );
+            self.add(
+                "files",
+                "expandAll",
+                "=",
+                "Expand directories",
+                "Expand all commit-file directories.",
+            );
         }
         if selected {
             if app.focus == Panel::CommitFiles {
@@ -853,8 +886,8 @@ pub fn for_app(app: &App) -> Vec<Action> {
                 "universal",
                 "extrasMenu",
                 "@",
-                "Output visibility…",
-                "Show or hide the command-output drawer.",
+                "Details / output…",
+                "Switch the Details and Output tabs in pane 6.",
             );
         }
     }
@@ -936,6 +969,8 @@ pub fn for_app(app: &App) -> Vec<Action> {
             | Panel::Files
             | Panel::CommitFiles
             | Panel::HeadFiles
+            | Panel::Details
+            | Panel::Output
     ) && !(app.focus == Panel::Diff && app.side == Panel::HeadFiles)
     {
         catalog.add(
@@ -943,7 +978,7 @@ pub fn for_app(app: &App) -> Vec<Action> {
             "nextTab",
             "]",
             "Next tab / diff side",
-            "Switch tabs: file changes / HEAD tree, branch/history tabs, or staged / unstaged diffs.",
+            "Switch Details / Output, Changes / HEAD tree, branch/history tabs, or staged / unstaged diffs.",
         );
         catalog.add(
             "universal",
@@ -984,6 +1019,35 @@ pub fn for_app(app: &App) -> Vec<Action> {
             "<shift+up>",
             "Fast up",
             "Move up by one visible page of commits.",
+        );
+    }
+    if matches!(
+        app.focus,
+        Panel::Files | Panel::CommitFiles | Panel::HeadFiles
+    ) {
+        catalog.add(
+            "files",
+            "toggleAllDirectories",
+            "*",
+            "Expand / collapse all",
+            "Toggle all directories in this file tree, including nested folders.",
+        );
+    }
+    if matches!(app.focus, Panel::Files | Panel::CommitFiles) {
+        catalog.key(
+            "<shift+down>",
+            "Extend selection down",
+            "Mark this path and the next file or folder.",
+        );
+        catalog.key(
+            "<shift+up>",
+            "Extend selection up",
+            "Mark this path and the previous file or folder.",
+        );
+        catalog.key(
+            "<esc>",
+            "Clear selection / return",
+            "Clear marked paths before leaving the file list.",
         );
     }
     catalog.add(

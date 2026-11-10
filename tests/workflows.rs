@@ -101,6 +101,251 @@ fn git(root: &Path, args: impl IntoIterator<Item = impl AsRef<OsStr>>) -> String
 }
 
 #[test]
+fn selected_commit_files_apply_add_delete_rename_binary_and_literal_paths_only() {
+    let fixture = Fixture::new();
+    for path in [
+        "picked.txt",
+        "unpicked.txt",
+        "literal[1].txt",
+        "old.txt",
+        "deleted.txt",
+        "unrelated.txt",
+    ] {
+        fixture.write(path, "base\n");
+    }
+    fixture.write("binary.dat", [0, 1, 2]);
+    fixture.commit("base");
+    let base = git(fixture.dir.path(), ["rev-parse", "HEAD"])
+        .trim()
+        .to_owned();
+    fixture.write("picked.txt", "picked\n");
+    fixture.write("unpicked.txt", "unpicked source\n");
+    fixture.write("literal[1].txt", "literal\n");
+    fixture.write("binary.dat", [0, 3, 4]);
+    fixture.write("added.txt", "added\n");
+    git(fixture.dir.path(), ["mv", "old.txt", "renamed.txt"]);
+    fs::remove_file(fixture.dir.path().join("deleted.txt")).unwrap();
+    fixture.commit("source");
+    let source = git(fixture.dir.path(), ["rev-parse", "HEAD"])
+        .trim()
+        .to_owned();
+    let files = fixture
+        .repo
+        .commit_files(&source, &Cancellation::default())
+        .unwrap();
+    git(fixture.dir.path(), ["switch", "-qc", "target", &base]);
+    fixture.write("unrelated.txt", "already staged\n");
+    git(fixture.dir.path(), ["add", "unrelated.txt"]);
+    fixture.write("unpicked.txt", "keep dirty\n");
+    let selected: Vec<_> = files
+        .iter()
+        .filter(|file| file.path != Path::new("unpicked.txt"))
+        .collect();
+    let target = PreviewTarget::CommitFiles {
+        oid: source.clone(),
+        paths: selected.iter().map(|file| file.path.clone()).collect(),
+    };
+    let settings = GuiConfig {
+        diff_preview_max_file_bytes: 1,
+        ..GuiConfig::default()
+    };
+    assert!(
+        fixture
+            .repo
+            .preview(
+                &target,
+                false,
+                &settings,
+                3,
+                false,
+                &Cancellation::default()
+            )
+            .unwrap()
+            .suppressed
+    );
+    let preview = fixture
+        .repo
+        .preview(&target, true, &settings, 3, false, &Cancellation::default())
+        .unwrap();
+    assert!(preview.text.contains("+picked"));
+    assert!(!preview.text.contains("+unpicked source"));
+    fixture.execute(Operation::cherry_pick_files(&source, &selected).unwrap());
+    for (path, contents) in [
+        ("picked.txt", "picked\n"),
+        ("literal[1].txt", "literal\n"),
+        ("added.txt", "added\n"),
+        ("renamed.txt", "base\n"),
+        ("unrelated.txt", "already staged\n"),
+        ("unpicked.txt", "keep dirty\n"),
+    ] {
+        assert_eq!(
+            fs::read_to_string(fixture.dir.path().join(path)).unwrap(),
+            contents
+        );
+    }
+    assert_eq!(
+        fs::read(fixture.dir.path().join("binary.dat")).unwrap(),
+        [0, 3, 4]
+    );
+    assert!(!fixture.dir.path().join("old.txt").exists());
+    assert!(!fixture.dir.path().join("deleted.txt").exists());
+    assert_eq!(git(fixture.dir.path(), ["rev-parse", "HEAD"]).trim(), base);
+    let staged = git(fixture.dir.path(), ["diff", "--cached", "--name-only"]);
+    assert!(staged.contains("picked.txt"));
+    assert!(staged.contains("unrelated.txt"));
+    assert!(!staged.contains("unpicked.txt"));
+}
+
+#[test]
+fn selected_literal_paths_stage_and_discard_without_matching_other_files() {
+    let fixture = Fixture::new();
+    fixture.write("file[1].txt", "literal base\n");
+    fixture.write("file1.txt", "other base\n");
+    fixture.commit("base");
+    fixture.write("file[1].txt", "literal changed\n");
+    fixture.write("file1.txt", "keep other changes\n");
+    let snapshot = fixture.snapshot();
+    let selected: Vec<_> = snapshot
+        .files
+        .iter()
+        .filter(|file| file.path == Path::new("file[1].txt"))
+        .collect();
+    fixture.execute(stage_operation(&selected, false, true).unwrap());
+    assert_eq!(
+        git(fixture.dir.path(), ["diff", "--cached", "--name-only"]).trim(),
+        "file[1].txt"
+    );
+    fixture.execute(discard_operation(&selected, true).unwrap());
+    assert_eq!(
+        fs::read_to_string(fixture.dir.path().join("file[1].txt")).unwrap(),
+        "literal base\n"
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.dir.path().join("file1.txt")).unwrap(),
+        "keep other changes\n"
+    );
+    assert!(git(fixture.dir.path(), ["diff", "--cached", "--name-only"]).is_empty());
+}
+
+#[test]
+fn selected_commit_files_conflicts_leave_all_paths_and_index_untouched() {
+    let fixture = Fixture::new();
+    fixture.write("a.txt", "base a\n");
+    fixture.write("b.txt", "base b\n");
+    fixture.commit("base");
+    let base = git(fixture.dir.path(), ["rev-parse", "HEAD"])
+        .trim()
+        .to_owned();
+    fixture.write("a.txt", "source a\n");
+    fixture.write("b.txt", "source b\n");
+    fixture.commit("source");
+    let source = git(fixture.dir.path(), ["rev-parse", "HEAD"])
+        .trim()
+        .to_owned();
+    let files = fixture
+        .repo
+        .commit_files(&source, &Cancellation::default())
+        .unwrap();
+    git(fixture.dir.path(), ["switch", "-qc", "target", &base]);
+    fixture.write("b.txt", "keep my changes\n");
+    let index = fs::read(fixture.repo.git_dir.join("index")).unwrap();
+    let operation =
+        Operation::cherry_pick_files(&source, &files.iter().collect::<Vec<_>>()).unwrap();
+    assert!(
+        fixture
+            .repo
+            .execute(&operation, &Cancellation::default(), None)
+            .is_err()
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.dir.path().join("a.txt")).unwrap(),
+        "base a\n"
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.dir.path().join("b.txt")).unwrap(),
+        "keep my changes\n"
+    );
+    assert_eq!(fs::read(fixture.repo.git_dir.join("index")).unwrap(), index);
+}
+
+#[test]
+fn selected_root_commit_files_can_be_picked_without_unselected_files() {
+    let fixture = Fixture::new();
+    fixture.write("picked.txt", "picked root\n");
+    fixture.write("unpicked.txt", "unpicked root\n");
+    fixture.commit("root source");
+    let source = git(fixture.dir.path(), ["rev-parse", "HEAD"])
+        .trim()
+        .to_owned();
+    let files = fixture
+        .repo
+        .commit_files(&source, &Cancellation::default())
+        .unwrap();
+    git(fixture.dir.path(), ["switch", "--orphan", "target"]);
+    git(
+        fixture.dir.path(),
+        ["commit", "--allow-empty", "-qm", "empty target"],
+    );
+    let selected: Vec<_> = files
+        .iter()
+        .filter(|file| file.path == Path::new("picked.txt"))
+        .collect();
+    fixture.execute(Operation::cherry_pick_files(&source, &selected).unwrap());
+    assert_eq!(
+        fs::read_to_string(fixture.dir.path().join("picked.txt")).unwrap(),
+        "picked root\n"
+    );
+    assert!(!fixture.dir.path().join("unpicked.txt").exists());
+    assert_eq!(
+        git(fixture.dir.path(), ["diff", "--cached", "--name-only"]).trim(),
+        "picked.txt"
+    );
+}
+
+#[test]
+fn selected_merge_commit_files_use_the_first_parent_diff() {
+    let fixture = Fixture::new();
+    fixture.write("feature.txt", "base\n");
+    fixture.write("main.txt", "base\n");
+    fixture.commit("base");
+    git(fixture.dir.path(), ["switch", "-qc", "feature"]);
+    fixture.write("feature.txt", "feature\n");
+    fixture.commit("feature");
+    git(fixture.dir.path(), ["switch", "-q", "main"]);
+    fixture.write("main.txt", "main\n");
+    fixture.commit("main");
+    let base = git(fixture.dir.path(), ["rev-parse", "HEAD"])
+        .trim()
+        .to_owned();
+    git(
+        fixture.dir.path(),
+        ["merge", "--no-ff", "-qm", "merge", "feature"],
+    );
+    let source = git(fixture.dir.path(), ["rev-parse", "HEAD"])
+        .trim()
+        .to_owned();
+    let files = fixture
+        .repo
+        .commit_files(&source, &Cancellation::default())
+        .unwrap();
+    git(fixture.dir.path(), ["switch", "-qc", "target", &base]);
+    fixture
+        .execute(Operation::cherry_pick_files(&source, &files.iter().collect::<Vec<_>>()).unwrap());
+    assert_eq!(
+        fs::read_to_string(fixture.dir.path().join("feature.txt")).unwrap(),
+        "feature\n"
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.dir.path().join("main.txt")).unwrap(),
+        "main\n"
+    );
+    assert_eq!(
+        git(fixture.dir.path(), ["diff", "--cached", "--name-only"]).trim(),
+        "feature.txt"
+    );
+}
+
+#[test]
 fn clean_repository_keeps_all_tracked_files_and_honors_ignored_toggle() {
     let fixture = Fixture::new();
     fixture.write("nested/clean.txt", "clean\n");

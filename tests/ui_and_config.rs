@@ -177,9 +177,11 @@ fn app() -> (tempfile::TempDir, App) {
 }
 
 #[test]
-fn panel_eight_focuses_command_output_and_restores_hidden_output() {
+fn pane_six_switches_details_and_output_without_a_separate_drawer() {
     let (_dir, mut app) = app();
     app.state.hide_command_log = true;
+    let bounds = ratatui::layout::Rect::new(0, 0, 100, 32);
+    let original = ui::areas(bounds, &app);
     app.handle_key(KeyEvent::new(KeyCode::Char('8'), KeyModifiers::NONE));
     assert_eq!(app.focus, Panel::Output);
     assert!(!app.state.hide_command_log);
@@ -187,7 +189,30 @@ fn panel_eight_focuses_command_output_and_restores_hidden_output() {
     terminal.draw(|frame| ui::draw(frame, &mut app)).unwrap();
     let buffer = terminal.backend().buffer();
     let text = format!("{buffer:?}");
-    assert!(text.contains("Command output"));
+    assert!(text.contains("[Output]"));
+    let output = ui::areas(bounds, &app);
+    assert_eq!(output.output, original.details);
+    assert!(output.details.is_empty());
+    assert_eq!(output.graph, original.graph);
+    assert_eq!(output.diff, original.diff);
+    assert_eq!(
+        ui::hit_test(bounds, &app, output.output.x + 1, output.output.y + 1)
+            .unwrap()
+            .0,
+        Panel::Output
+    );
+    app.handle_key(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::NONE));
+    assert_eq!(app.focus, Panel::Details);
+    assert!(app.state.hide_command_log);
+    app.handle_key(KeyEvent::new(KeyCode::Char('['), KeyModifiers::NONE));
+    assert_eq!(app.focus, Panel::Output);
+    app.handle_key(KeyEvent::new(KeyCode::Char('6'), KeyModifiers::NONE));
+    assert_eq!(app.focus, Panel::Output);
+    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert_eq!(app.focus, Panel::Files);
+    app.handle_key(KeyEvent::new(KeyCode::Char('0'), KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert_eq!(app.focus, Panel::Status);
 }
 
 #[test]

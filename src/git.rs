@@ -53,6 +53,7 @@ pub struct Repository {
 #[derive(Clone, Debug)]
 pub enum Step {
     Command(CommandSpec),
+    ApplyCommitFiles { oid: String, paths: Vec<PathBuf> },
     DeleteUntracked(PathBuf),
     AppendIgnore(PathBuf),
 }
@@ -108,6 +109,54 @@ impl Operation {
             steps: vec![Step::Command(command)],
         }
     }
+    pub fn cherry_pick_files(oid: &str, files: &[&FileEntry]) -> Result<Self> {
+        if oid.is_empty() || !oid.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            bail!("Select a loaded commit before cherry-picking files");
+        }
+        let mut paths = Vec::new();
+        for file in files {
+            for path in std::iter::once(&file.path).chain(file.old_path.iter()) {
+                validate_path(path)?;
+                paths.push(path.clone());
+            }
+        }
+        paths.sort_unstable();
+        paths.dedup();
+        if paths.is_empty() {
+            bail!("No commit files selected");
+        }
+        Ok(Self {
+            label: format!(
+                "Cherry-pick {} selected paths from {} (stage only)",
+                paths.len(),
+                &oid[..oid.len().min(8)]
+            ),
+            steps: vec![Step::ApplyCommitFiles {
+                oid: oid.into(),
+                paths,
+            }],
+        })
+    }
+}
+
+fn commit_files_diff(oid: &str, paths: &[PathBuf]) -> CommandSpec {
+    let mut args: Vec<OsString> = [
+        "--literal-pathspecs",
+        "show",
+        "--format=",
+        "--root",
+        "--first-parent",
+        "--no-renames",
+        "--no-color",
+        "--no-ext-diff",
+        "--no-textconv",
+    ]
+    .into_iter()
+    .map(Into::into)
+    .collect();
+    args.extend([oid.into(), "--".into()]);
+    args.extend(paths.iter().map(|path| path.as_os_str().to_owned()));
+    CommandSpec::git(args)
 }
 
 fn without_newline(bytes: &[u8]) -> &[u8] {
@@ -277,7 +326,12 @@ impl Repository {
         }
         let title = format!("HEAD: {}", path.to_string_lossy());
         let mut object = OsString::from(format!("{oid}:"));
-        object.push(path);
+        for (index, component) in path.components().enumerate() {
+            if index > 0 {
+                object.push("/");
+            }
+            object.push(component.as_os_str());
+        }
         if !explicit && settings.diff_preview_max_file_bytes > 0 {
             let size = self.read(
                 [OsString::from("cat-file"), "-s".into(), object.clone()],
@@ -835,7 +889,10 @@ impl Repository {
         let mut args: Vec<OsString> = Vec::new();
         let mut title = String::new();
         let mut staged = false;
-        let file = matches!(target, PreviewTarget::File { .. });
+        let file = matches!(
+            target,
+            PreviewTarget::File { .. } | PreviewTarget::CommitFiles { .. }
+        );
         if let PreviewTarget::File {
             path,
             old_path,
@@ -865,6 +922,36 @@ impl Repository {
             }
         }
         match target {
+            PreviewTarget::CommitFiles { oid, paths } => {
+                title = format!(
+                    "{} selected paths · {}",
+                    paths.len(),
+                    &oid[..oid.len().min(8)]
+                );
+                for path in paths {
+                    if !explicit
+                        && self.file_too_large(
+                            path,
+                            None,
+                            Some(oid),
+                            settings.diff_preview_max_file_bytes,
+                            cancel,
+                        )?
+                    {
+                        return Ok(Preview {
+                            title,
+                            text: "Automatic preview skipped: a selected file exceeds the preview limit. Press 0 or Enter to open it.".into(),
+                            suppressed: true,
+                            ..Preview::default()
+                        });
+                    }
+                }
+                args = commit_files_diff(oid, paths).args;
+                args.insert(2, format!("--unified={context}").into());
+                if ignore_whitespace {
+                    args.insert(2, "--ignore-all-space".into());
+                }
+            }
             PreviewTarget::Comparison {
                 from,
                 to,
@@ -1257,6 +1344,43 @@ impl Repository {
         for step in &operation.steps {
             cancel.check()?;
             match step {
+                Step::ApplyCommitFiles { oid, paths } => {
+                    if paths.is_empty() {
+                        bail!("No commit files selected");
+                    }
+                    for path in paths {
+                        validate_path(path)?;
+                    }
+                    let mut diff = commit_files_diff(oid, paths);
+                    diff.args.insert(2, "--binary".into());
+                    diff.args.insert(2, "--full-index".into());
+                    let diff = CommandSpec::git(diff.args);
+                    log_step(format!("> {}\n", diff.label))?;
+                    let output =
+                        process::run(&self.root, &diff, cancel, READ_LIMIT, None, READ_TIMEOUT)?;
+                    if output.truncated {
+                        bail!("Selected commit patch exceeds the 64 MiB limit; select fewer files");
+                    }
+                    let output = output.success()?;
+                    if output.stdout.is_empty() {
+                        bail!("The selected paths have no changes in this commit");
+                    }
+                    let mut apply = CommandSpec::git(["apply", "--index", "--whitespace=nowarn"]);
+                    apply.stdin = Some(output.stdout);
+                    log_step(format!("> {}\n", apply.label))?;
+                    process::run(
+                        &self.root,
+                        &apply,
+                        cancel,
+                        READ_LIMIT,
+                        stream.clone(),
+                        READ_TIMEOUT,
+                    )?
+                    .success()?;
+                    summary.push_str(
+                        "Selected commit changes applied to the working tree and staged.\n",
+                    );
+                }
                 Step::Command(command) => {
                     log_step(format!("> {}\n", command.label))?;
                     let output = process::run(
@@ -1384,6 +1508,7 @@ pub fn stage_operation(files: &[&FileEntry], unstage: bool, has_head: bool) -> R
     };
     args.push("--".into());
     args.extend(paths);
+    args.insert(0, "--literal-pathspecs".into());
     Ok(Operation::git(args))
 }
 
@@ -1417,6 +1542,7 @@ pub fn discard_operation(files: &[&FileEntry], has_head: bool) -> Result<Operati
             "--".into(),
         ];
         args.extend(tracked);
+        args.insert(0, "--literal-pathspecs".into());
         steps.insert(0, Step::Command(CommandSpec::git(args)));
     }
     if steps.is_empty() {

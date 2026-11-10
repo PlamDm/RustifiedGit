@@ -85,21 +85,11 @@ pub fn areas(area: Rect, app: &App) -> Areas {
         }
         return result;
     }
-    let output_height = if app.state.hide_command_log {
-        0
-    } else if app.focus == Panel::Output {
-        (vertical[1].height / 3).max(5)
-    } else {
-        5.min(vertical[1].height / 3)
-    };
-    let body = Layout::vertical([Constraint::Min(1), Constraint::Length(output_height)])
-        .split(vertical[1]);
-    result.output = body[1];
     let sidebar_width = (area.width as f64 * app.config.gui.side_panel_width)
         .round()
         .clamp(19.0, 32.0) as u16;
-    let columns =
-        Layout::horizontal([Constraint::Length(sidebar_width), Constraint::Min(1)]).split(body[0]);
+    let columns = Layout::horizontal([Constraint::Length(sidebar_width), Constraint::Min(1)])
+        .split(vertical[1]);
     let left = Layout::vertical([
         Constraint::Length(4),
         Constraint::Fill(4),
@@ -119,7 +109,11 @@ pub fn areas(area: Rect, app: &App) -> Areas {
     result.graph = top[0];
     let inspector =
         Layout::vertical([Constraint::Percentage(48), Constraint::Min(3)]).split(top[1]);
-    result.details = inspector[0];
+    if app.details_panel() == Panel::Output {
+        result.output = inspector[0];
+    } else {
+        result.details = inspector[0];
+    }
     result.files = inspector[1];
     result
 }
@@ -582,8 +576,8 @@ fn initials(name: &str) -> String {
         .collect()
 }
 
-fn short_date(date: &str) -> String {
-    let Some(date) = date.get(..10) else {
+fn short_datetime(timestamp: &str) -> String {
+    let Some(date) = timestamp.get(..10) else {
         return "—".into();
     };
     let mut fields = date.split('-');
@@ -600,10 +594,15 @@ fn short_date(date: &str) -> String {
     if !(1..=31).contains(&day) {
         return "—".into();
     }
-    months
-        .get(month.wrapping_sub(1))
-        .map(|month| format!("{day:02} {month} {year}"))
-        .unwrap_or_else(|| "—".into())
+    let Some(month) = months.get(month.wrapping_sub(1)) else {
+        return "—".into();
+    };
+    let mut result = format!("{day:02} {month} {year}");
+    if let Some(time) = timestamp.get(11..16) {
+        result.push(' ');
+        result.push_str(time);
+    }
+    result
 }
 
 fn highlighted_spans(spans: Vec<Span<'static>>, positions: &[usize]) -> Vec<Span<'static>> {
@@ -770,7 +769,7 @@ fn draw_graph(frame: &mut Frame, area: Rect, app: &mut App) {
                 } else {
                     &commit.committer
                 }),
-                short_date(if commit.committed_at.is_empty() {
+                short_datetime(if commit.committed_at.is_empty() {
                     &commit.date
                 } else {
                     &commit.committed_at
@@ -800,9 +799,8 @@ fn draw_graph(frame: &mut Frame, area: Rect, app: &mut App) {
             }
             if !commit.decorations.is_empty() {
                 let used: usize = spans.iter().map(Span::width).sum();
-                let remaining = left_width.saturating_sub(used);
-                let budget = (remaining / 3).min(26);
-                if budget >= 5 {
+                let budget = left_width.saturating_sub(used);
+                if budget >= 4 {
                     let mut source_offset = decorations_offset;
                     let mut display_offset = 0;
                     let mut label_matches = Vec::new();
@@ -928,7 +926,7 @@ fn file_line(
     };
     let index = row.status.chars().next().unwrap_or(' ');
     let worktree = row.status.chars().nth(1).unwrap_or(' ');
-    let marker = if app.file_panel() == Panel::Files && app.marked.contains(&row.path) {
+    let marker = if app.file_is_marked(&row.path) {
         "●"
     } else if row.directory {
         if app.collapsed.contains(&row.path) && app.search(app.file_panel()).is_empty() {
@@ -1114,9 +1112,9 @@ fn draw_details(frame: &mut Frame, area: Rect, app: &mut App) {
             .scroll((app.scrolls[9].min(u16::MAX as usize) as u16, 0))
             .block(block(
                 if app.comparison.is_some() {
-                    "6 Comparison"
+                    "6 [Comparison] | Output"
                 } else {
-                    "6 Commit details"
+                    "6 [Details] | Output"
                 },
                 app.focus == Panel::Details,
             )),
@@ -1227,7 +1225,7 @@ fn draw_output(frame: &mut Frame, area: Rect, app: &mut App) {
         .collect();
     let title = if let Some((_, started, label)) = &app.busy {
         format!(
-            "8 Command output · {} {} · {}s · Ctrl+c cancel",
+            "6 [Output] · {} {} · {}s · Ctrl+c cancel | Details",
             activity_spinner(started.elapsed()),
             if label.starts_with("git switch ") {
                 "switching"
@@ -1237,7 +1235,7 @@ fn draw_output(frame: &mut Frame, area: Rect, app: &mut App) {
             started.elapsed().as_secs(),
         )
     } else {
-        "8 Command output".into()
+        "6 Details | [Output]".into()
     };
     frame.render_widget(
         Paragraph::new(lines).block(block(title, app.focus == Panel::Output)),
@@ -1686,4 +1684,4 @@ pub fn hit_test(area: Rect, app: &App, x: u16, y: u16) -> Option<(Panel, usize)>
     None
 }
 
-pub const HELP: &str = "Numbered panes\n  1 Repositories · 2 Local branches · 3 Remote branches · 4 Stashes\n  5 Commit graph · 6 Commit details · 7 Changed files · 0 Diff · 8 Output\n  Number keys focus panes · Tab/Shift+Tab cycle · + zoom focused pane\n  O opens context actions; o also works where it is not the file opener.\n  Choose with arrows; Enter/shortcut runs; descriptions appear below.\n  j/k or arrows move · Home/End/PageUp/PageDown scroll · / search\n  Esc returns · q quits · Ctrl+r recent repos · @ show/hide output\n\nBranches and graph\n  Space toggles a branch in the graph; this does not check it out.\n  Enabled local and remote branches are combined with shared ancestors.\n  Slash-delimited branches form nested groups: feature/user/login.\n  Enter toggles groups; Left/Right navigates; Space toggles a whole group.\n  Enter checks out the selected branch · * marks the current branch.\n  Branch visibility is saved separately for each repository.\n  j/k in the graph updates details and files without moving focus.\n  Shift+Up/Down or PageUp/PageDown moves by a visible page of commits.\n  The right edge shows committer initials/date; long subjects end in ….\n  Working tree / Index appears directly above the active branch tip.\n  Enter in graph focuses files · Enter on a file opens its diff full screen; Esc returns to files.\n  [ / ] in local branches switches branches/tags/worktrees.\n  [ / ] switches commits/reflog · . loads another page of commits.\n  The active branch is bold; AHEAD/BEHIND compares its known upstream.\n  L or actions → Loaded commits sets the saved initial/page size.\n  Older commits load automatically near the end; + means more remain.\n  G builds Git's acceleration cache for large repositories.\n\nComparing revisions\n  B opens comparison options from the graph, branches or files.\n  Mark A, select B, then Compare marked; or enter two revision names.\n  Compare with base branch uses common ancestor -> selected branch.\n  Pane 7 lists changes; pane 0 shows the selected file diff; pane 6 summarizes.\n  Comparisons are read only; B can swap direction or close.\n  Esc from diff returns to files; Esc again or 5 returns to the graph.\n\nFile tabs and search\n  [ / ] in pane 7 switches Changes / HEAD tree.\n  Changes follows the hovered commit; HEAD tree shows committed HEAD files.\n  / or Ctrl+f starts live fuzzy search in the graph, branch panes and file tabs.\n  Arrows select; Enter keeps; Esc cancels.\n  Space-separated terms combine; 'term is literal; !term excludes; smart case.\n  Commit results are ranked and search loaded history only.\n\nWorking files\n  Space stage/unstage · a stage all · c commit · C editor · A amend\n  D reset menu (including submodule stashing/reset) · d discard\n  s stash with untracked · S stash options · i ignore · I show ignored\n  Grave key tree/flat · - collapse · = expand · v mark · Shift+arrows range\n  Ctrl+s file/history filters; turn off changed-only to browse clean files\n  F file history follows renames · e editor · o opener · y copy path\n  Ctrl+t configured difftool · Alt+m mergetool · M conflict menu\n\nDiff\n  ~ saves automatic previews on/off · 0 explicitly opens the full diff\n  Automatic file limit 2 MiB and output limit 512 KiB (configurable)\n  Up/down scroll within hunks · PageUp/PageDown scroll a screen\n  Left/right jump hunks · a hunk/line mode · Space stage/unstage\n  d discard selected change · [ / ] staged/unstaged · { / } context\n  H/L horizontal scroll · Ctrl+w whitespace · n/N next file or search match\n\nHistory and operations\n  Graph: g reset · t revert · C copy · V cherry-pick · F fixup · T tag\n  i interactive rebase · r/R reword/rebase editor · b bisect · y copy hash\n  Branches: n new · c checkout by name · R rename · M merge · r rebase\n  F force checkout · T tag · u upstream · w worktree · d delete\n  Stashes: Space apply · g pop · d drop · Enter diff · s save\n  p pull options · P push options · R refresh · m continue/abort/skip operation\n  : captured command with live output · ! interactive terminal command\n  A blocked command opens a popup; it is not queued.\n  Ctrl+c cancels even from the popup · End follows output\n";
+pub const HELP: &str = "Numbered panes\n  1 Repositories · 2 Local branches · 3 Remote branches · 4 Stashes\n  5 Commit graph · 6 Details/Output · 7 Changed files · 0 Diff\n  Number keys focus panes · Tab/Shift+Tab cycle · + zoom focused pane\n  [ / ] in pane 6 switches Details / Output; 8 opens Output directly.\n  O opens context actions; o also works where it is not the file opener.\n  Choose with arrows; Enter/shortcut runs; descriptions appear below.\n  j/k or arrows move · Home/End/PageUp/PageDown scroll · / search\n  Esc clears file selection/returns · q quits · Ctrl+r recent repos · @ Details/Output\n\nBranches and graph\n  Space toggles a branch in the graph; this does not check it out.\n  Enabled local and remote branches are combined with shared ancestors.\n  Slash-delimited branches form nested groups: feature/user/login.\n  Enter toggles groups; Left/Right navigates; Space toggles a whole group.\n  Enter checks out the selected branch · * marks the current branch.\n  Branch visibility is saved separately for each repository.\n  j/k in the graph updates details and files without moving focus.\n  Shift+Up/Down or PageUp/PageDown moves by a visible page of commits.\n  The right edge shows committer initials/date/time; branch and tag labels take priority over subjects.\n  Working tree / Index appears directly above the active branch tip.\n  Enter in graph focuses files · Enter on a file opens its diff full screen; Esc returns to files.\n  [ / ] in local branches switches branches/tags/worktrees.\n  [ / ] switches commits/reflog · . loads another page of commits.\n  The active branch is bold; AHEAD/BEHIND compares its known upstream.\n  L or actions → Loaded commits sets the saved initial/page size.\n  Older commits load automatically near the end; + means more remain.\n  G builds Git's acceleration cache for large repositories.\n\nComparing revisions\n  B opens comparison options from the graph, branches or files.\n  Mark A, select B, then Compare marked; or enter two revision names.\n  Compare with base branch uses common ancestor -> selected branch.\n  Pane 7 lists changes; pane 0 shows the selected file diff; pane 6 summarizes.\n  Comparisons are read only; B can swap direction or close.\n  Esc from diff returns to files; Esc again or 5 returns to the graph.\n\nFile tabs and selection\n  [ / ] in pane 7 switches Changes / HEAD tree.\n  Changes follows the hovered commit; HEAD tree shows committed HEAD files.\n  Shift+Up/Down selects files/folders; v marks/unmarks; Esc clears selection.\n  Folders include their descendants; * toggles all folders; - collapses; = expands.\n  Commit files: V applies and stages selected commit changes without committing.\n  Commit files: c restores full versions; d discards selected paths' current uncommitted changes.\n  Marked commit files share one diff; unrelated files are not changed.\n  / or Ctrl+f starts live fuzzy search in the graph, branch panes and file tabs.\n  Arrows select; Enter keeps; Esc cancels.\n  Space-separated terms combine; 'term is literal; !term excludes; smart case.\n  Commit results are ranked and search loaded history only.\n\nWorking files\n  Space stage/unstage · a stage all · c commit · C editor · A amend\n  D reset menu (including submodule stashing/reset) · d discard selected paths\n  s stash with untracked · S stash options · i ignore · I show ignored\n  Grave key tree/flat · - collapse · = expand · v mark · Shift+arrows range\n  Ctrl+s file/history filters; turn off changed-only to browse clean files\n  F file history follows renames · e editor · o opener · y copy path\n  Ctrl+t configured difftool · Alt+m mergetool · M conflict menu\n\nDiff\n  ~ saves automatic previews on/off · 0 explicitly opens the full diff\n  Automatic file limit 2 MiB and output limit 512 KiB (configurable)\n  Up/down scroll within hunks · PageUp/PageDown scroll a screen\n  Left/right jump hunks · a hunk/line mode · Space stage/unstage\n  d discard selected change · [ / ] staged/unstaged · { / } context\n  H/L horizontal scroll · Ctrl+w whitespace · n/N next file or search match\n\nHistory and operations\n  Graph: g reset · t revert · C copy · V cherry-pick · F fixup · T tag\n  i interactive rebase · r/R reword/rebase editor · b bisect · y copy hash\n  Branches: n new · c checkout by name · R rename · M merge · r rebase\n  F force checkout · T tag · u upstream · w worktree · d delete\n  Stashes: Space apply · g pop · d drop · Enter diff · s save\n  p pull options · P push options · R refresh · m continue/abort/skip operation\n  : captured command with live output · ! interactive terminal command\n  A blocked command opens a popup; it is not queued.\n  Ctrl+c cancels even from the popup · End follows output\n";

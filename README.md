@@ -30,7 +30,7 @@ The keyboard layout places repository navigation on the left, the commit graph
 in the middle, and commit details and changed files on the right:
 
 ```text
-┌ 1 Repositories ┐┌ 5 Commit graph ─────────┐┌ 6 Commit details ┐
+┌ 1 Repositories ┐┌ 5 Commit graph ─────────┐┌ 6 Details/Output┐
 ├ 2 Local ──────┤│ Working tree / Index    ││ Message and body │
 │ [x] main      ││ * Merge feature        ││ Author, date, SHA│
 │ [ ] feature   ││ |\                     │├ 7 Changed files ┤
@@ -39,19 +39,23 @@ in the middle, and commit details and changed files on the right:
 ├ 4 Stashes ────┤└────────────────────────┴┴──────────────────┤
 │ stash@{0}     │┌ 0 Diff ───────────────────────────────────┤
 └───────────────┘└───────────────────────────────────────────┘
-                  8 Command output (drawer)
 ```
 
 Press a number to focus its pane, `Tab`/`Shift+Tab` to cycle, and `+` to zoom.
+Pane **6** contains Details and Output tabs; `[` / `]` switches between them.
+Commands open the Output tab automatically without taking focus from the files
+or graph. `8` remains a shortcut to that tab, not a separate pane.
 In local or remote branches, **Space toggles graph visibility**; **Enter checks
 out** the branch. The graph combines enabled refs and their shared ancestors
 without duplicate commits, preserving Git's merge connections. Visibility is
 saved per repository. Initially the graph shows the current branch.
 
-Graph rows reserve the right edge for the committer's initials and a date such
-as `PD 26 Nov 2026`. Long subjects end with an ellipsis before those columns;
-the details pane keeps the full message. Initials and dates use the committer,
-which may differ from the original author when changes are cherry-picked.
+Graph rows reserve the right edge for the committer's initials, date and time,
+such as `PD 26 Nov 2026 12:34`, in the commit's recorded timezone. Branch and tag
+labels take priority over the subject, which uses the remaining space and ends
+with an ellipsis when truncated; the details pane keeps the full message.
+Initials and timestamps use the committer, which may differ from the original
+author when changes are cherry-picked.
 
 Local and remote branches form nested groups separated by `/`: a branch named
 `feature/user/login` appears under `feature/` → `user/` → `login`. Remotes add a
@@ -172,7 +176,8 @@ Focusing the graph with `5` also returns to normal commit inspection.
 - `~` saves the automatic preview preference. Automatic file previews inspect
   file/index/object sizes before loading content: 2 MiB per file version and
   512 KiB of diff output by default. Explicit `0`/Enter bypasses those limits.
-- `8` focuses live command output. Long operations run in the background; their
+- The Output tab in pane `6` shows live command output (`8` focuses it directly).
+  Long operations run in the background; their
   output stays visible. `Ctrl+c` cancels their process group, including child
   Git/SSH/hook processes. Read workers cancel stale selections separately.
   Invoking another operation opens a popup naming the active and blocked commands;
@@ -182,6 +187,21 @@ Focusing the graph with `5` also returns to normal commit inspection.
   Git and Git LFS stays visible while it updates, including counts and speeds
   when the command provides them. The output pane shows a running indicator
   during phases where the command has no progress details to report.
+
+In pane **7**, `Shift+Up` / `Shift+Down` selects files and folders, and `v`
+toggles an individual selection. Selecting a folder includes its descendants.
+`Esc` clears the selection; from a full-screen diff it also returns to files.
+`*` toggles all folders expanded/collapsed, including nested folders; `-` and `=`
+still explicitly collapse and expand them.
+
+When browsing a commit's changed files, the diff combines the marked paths.
+`V` confirms applying **only those files' changes from that commit** to the
+current working tree and index, without creating a commit. Unrelated paths and
+staged changes are preserved; conflicting selected changes are rejected without
+partially applying the selection. `c` restores the selected files' complete
+versions instead. `d` confirms discarding **current uncommitted changes only**
+for the selected paths, not reverting the historical commit. Revision comparisons
+remain read-only.
 
 `p` opens pull options: fast-forward only, merge, rebase, rebase with autostash,
 fetch only, or overwrite the local branch with its fetched upstream. Overwrite

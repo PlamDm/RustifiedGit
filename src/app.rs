@@ -20,7 +20,7 @@ use std::{
     collections::{HashSet, VecDeque},
     env,
     ffi::OsString,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::Arc,
     time::Instant,
 };
@@ -162,6 +162,7 @@ pub struct App {
     inspection_oid: Option<String>,
     pub collapsed: HashSet<PathBuf>,
     pub marked: HashSet<PathBuf>,
+    pub marked_commit_files: HashSet<PathBuf>,
     pub copied_commits: Vec<String>,
     pub branch_tab: usize,
     pub commit_tab: usize,
@@ -293,6 +294,7 @@ impl App {
             collapsed_branches: std::array::from_fn(|_| HashSet::new()),
             collapsed: HashSet::new(),
             marked: HashSet::new(),
+            marked_commit_files: HashSet::new(),
             copied_commits: Vec::new(),
             branch_tab: 0,
             commit_tab: 0,
@@ -330,7 +332,7 @@ impl App {
             fullscreen: false,
             quit: false,
             dirty: true,
-            notice: "1 repos · 2 local · 3 remote · 4 stash · 5 graph · 6 details · 7 files · 0 diff · 8 output".into(),
+            notice: "1 repos · 2 local · 3 remote · 4 stash · 5 graph · 6 details/output · 7 files · 0 diff".into(),
             options,
             last_refresh: Instant::now(),
             last_fetch: Instant::now(),
@@ -354,6 +356,91 @@ impl App {
         } else {
             Panel::CommitFiles
         }
+    }
+    pub fn details_panel(&self) -> Panel {
+        if self.state.hide_command_log {
+            Panel::Details
+        } else {
+            Panel::Output
+        }
+    }
+    fn show_command_output(&mut self) {
+        self.state.hide_command_log = false;
+        if self.focus == Panel::Details {
+            self.focus = Panel::Output;
+        }
+    }
+    fn toggle_details_tab(&mut self) {
+        self.state.hide_command_log = !self.state.hide_command_log;
+        if matches!(self.focus, Panel::Details | Panel::Output) {
+            self.set_focus(self.details_panel());
+        }
+        self.save_state();
+    }
+    fn file_marks(&self) -> &HashSet<PathBuf> {
+        if self.side == Panel::CommitFiles {
+            &self.marked_commit_files
+        } else {
+            &self.marked
+        }
+    }
+    fn file_marks_mut(&mut self) -> &mut HashSet<PathBuf> {
+        if self.side == Panel::CommitFiles {
+            &mut self.marked_commit_files
+        } else {
+            &mut self.marked
+        }
+    }
+    pub fn file_is_marked(&self, path: &Path) -> bool {
+        let marks = match self.file_panel() {
+            Panel::Files => &self.marked,
+            Panel::CommitFiles => &self.marked_commit_files,
+            _ => return false,
+        };
+        marks.iter().any(|marked| path.starts_with(marked))
+    }
+    fn clear_file_marks(&mut self) -> bool {
+        if self.side == Panel::HeadFiles || self.file_marks().is_empty() {
+            return false;
+        }
+        self.file_marks_mut().clear();
+        self.preview_key = None;
+        self.request_preview(self.focus == Panel::Diff);
+        true
+    }
+    fn mark_current_file(&mut self, toggle: bool) {
+        if let Some(path) = self.row().map(|row| row.path.clone()) {
+            let marks = self.file_marks_mut();
+            if !toggle || !marks.remove(&path) {
+                marks.insert(path);
+            }
+        }
+    }
+    fn set_all_directories(&mut self, collapse: Option<bool>) {
+        let files = match self.file_panel() {
+            Panel::HeadFiles => &self.head_files,
+            Panel::CommitFiles => &self.commit_files,
+            _ => &self.snapshot.files,
+        };
+        let directories: HashSet<_> = files
+            .iter()
+            .flat_map(|file| file.path.ancestors().skip(1))
+            .filter(|path| !path.as_os_str().is_empty())
+            .map(Path::to_path_buf)
+            .collect();
+        let collapse = collapse.unwrap_or_else(|| {
+            directories
+                .iter()
+                .any(|path| !self.collapsed.contains(path))
+        });
+        if collapse {
+            self.collapsed.extend(directories);
+        } else {
+            self.collapsed.retain(|path| !directories.contains(path));
+        }
+        self.rebuild();
+        self.preview_key = None;
+        self.request_preview(false);
     }
     pub fn branch_visible(&self, reference: &crate::model::Reference) -> bool {
         self.options
@@ -597,6 +684,7 @@ impl App {
     }
 
     pub fn start_comparison(&mut self, request: ComparisonRequest) {
+        self.marked_commit_files.clear();
         self.workers.commit_files.cancel();
         self.workers.preview.cancel();
         self.inspection_oid = None;
@@ -631,6 +719,7 @@ impl App {
         self.workers.comparison.cancel();
         self.workers.preview.cancel();
         self.comparison_loading = false;
+        self.marked_commit_files.clear();
         self.inspection_oid = None;
         self.commit_files.clear();
         self.commit_rows.clear();
@@ -775,6 +864,7 @@ impl App {
         }
         if self.graph_working_tree {
             if self.inspection_oid.take().is_some() {
+                self.marked_commit_files.clear();
                 self.workers.commit_files.cancel();
                 self.commit_files.clear();
                 self.commit_rows.clear();
@@ -790,6 +880,7 @@ impl App {
             }
         } else if let Some(oid) = self.selected_commit().map(|commit| commit.oid.clone()) {
             if self.inspection_oid.as_ref() != Some(&oid) {
+                self.marked_commit_files.clear();
                 self.inspection_oid = Some(oid.clone());
                 self.commit_oid = oid.clone();
                 self.commit_files.clear();
@@ -1282,6 +1373,15 @@ impl App {
                     old_path: file.and_then(|file| file.old_path.clone()),
                 });
             }
+            if !self.marked_commit_files.is_empty() {
+                let paths = self.selected_file_paths();
+                if !paths.is_empty() {
+                    return Some(PreviewTarget::CommitFiles {
+                        oid: self.commit_oid.clone(),
+                        paths,
+                    });
+                }
+            }
         }
         match self.side {
             Panel::HeadFiles => {
@@ -1453,7 +1553,7 @@ impl App {
                                 "History load failed: {error}\n\nPreviously loaded commits were kept. Automatic retries are paused.\nOpen graph actions → Loaded commits… to choose a smaller page or retry."
                             );
                             self.append_output(&format!("\n✗ {message}\n"));
-                            self.state.hide_command_log = false;
+                            self.show_command_output();
                             self.notice =
                                 "History loading paused after an error · L opens loading options"
                                     .into();
@@ -1625,7 +1725,7 @@ impl App {
             return;
         }
         self.append_output(&format!("\n$ {}\n", operation.label));
-        self.state.hide_command_log = false;
+        self.show_command_output();
         self.output_follow = true;
         let cancel = Cancellation::default();
         let label = operation.label.clone();
@@ -1694,6 +1794,8 @@ impl App {
         }
         if panel == Panel::Output {
             self.state.hide_command_log = false;
+        } else if panel == Panel::Details {
+            self.state.hide_command_log = true;
         }
         if !matches!(
             panel,
@@ -1935,17 +2037,56 @@ impl App {
         });
     }
     fn selected_files(&self) -> Vec<&FileEntry> {
-        if !self.marked.is_empty() {
-            return self
-                .snapshot
-                .files
+        let files = if self.side == Panel::CommitFiles {
+            &self.commit_files
+        } else {
+            &self.snapshot.files
+        };
+        let marks = self.file_marks();
+        if !marks.is_empty() {
+            return files
                 .iter()
-                .filter(|file| self.marked.iter().any(|path| file.path.starts_with(path)))
+                .filter(|file| marks.iter().any(|path| file.path.starts_with(path)))
                 .collect();
         }
         self.row()
-            .map(|row| tree::matching_files(&self.snapshot.files, &row.path))
+            .map(|row| tree::matching_files(files, &row.path))
             .unwrap_or_default()
+    }
+    fn discard_selected_files(&mut self) -> Result<()> {
+        if self.comparison.is_some() {
+            bail!(
+                "Comparison files are read only. Close the comparison before discarding changes."
+            );
+        }
+        let selected = self.selected_files();
+        let files = if self.side == Panel::CommitFiles {
+            self.snapshot
+                .files
+                .iter()
+                .filter(|file| {
+                    selected.iter().any(|selected| {
+                        std::iter::once(&selected.path)
+                            .chain(selected.old_path.iter())
+                            .any(|path| file.path == *path || file.old_path.as_ref() == Some(path))
+                    })
+                })
+                .collect()
+        } else {
+            selected
+        };
+        self.confirm(discard_operation(&files, !self.snapshot.head.is_empty())?);
+        Ok(())
+    }
+    fn selected_file_paths(&self) -> Vec<PathBuf> {
+        let mut paths: Vec<_> = self
+            .selected_files()
+            .into_iter()
+            .flat_map(|file| std::iter::once(file.path.clone()).chain(file.old_path.clone()))
+            .collect();
+        paths.sort_unstable();
+        paths.dedup();
+        paths
     }
     fn stage(&mut self, all: bool) -> Result<()> {
         let files = if all {
@@ -1994,8 +2135,7 @@ impl App {
                 self.request_history();
             }
             MenuAction::ToggleLog => {
-                self.state.hide_command_log = !self.state.hide_command_log;
-                self.save_state();
+                self.toggle_details_tab();
             }
             MenuAction::ToggleUnchanged => {
                 self.config.gui.show_unchanged_files = !self.config.gui.show_unchanged_files;
@@ -2446,8 +2586,12 @@ impl App {
         }
         if self.is("universal", "return", &["<esc>"], key) {
             if self.focus == Panel::Diff {
+                self.clear_file_marks();
                 self.fullscreen = false;
                 self.set_focus(self.side);
+            } else if matches!(self.focus, Panel::Files | Panel::CommitFiles)
+                && self.clear_file_marks()
+            {
             } else if self.comparison.is_some() && self.search(self.focus).is_empty() {
                 self.close_comparison();
             } else if matches!(self.focus, Panel::CommitFiles | Panel::HeadFiles)
@@ -2524,7 +2668,7 @@ impl App {
             ('3', Panel::RemoteBranches),
             ('4', Panel::Stash),
             ('5', Panel::Commits),
-            ('6', Panel::Details),
+            ('6', self.details_panel()),
             ('7', self.file_panel()),
             ('8', Panel::Output),
         ] {
@@ -2591,7 +2735,7 @@ impl App {
             self.menu(
                 "Command output",
                 vec![MenuItem {
-                    label: "Show/hide command output".into(),
+                    label: "Switch Details / Output tab in pane 6".into(),
                     action: MenuAction::ToggleLog,
                 }],
             );
@@ -2608,6 +2752,29 @@ impl App {
             self.fullscreen = !self.fullscreen;
             return Ok(());
         }
+        if matches!(
+            self.focus,
+            Panel::Files | Panel::CommitFiles | Panel::HeadFiles
+        ) {
+            if self.is("files", "toggleAllDirectories", &["*"], key) {
+                self.set_all_directories(None);
+                return Ok(());
+            }
+            if self.is("files", "collapseAll", &["-"], key) {
+                self.set_all_directories(Some(true));
+                return Ok(());
+            }
+            if self.is("files", "expandAll", &["="], key) {
+                self.set_all_directories(Some(false));
+                return Ok(());
+            }
+        }
+        if matches!(self.focus, Panel::Files | Panel::CommitFiles) && key_matches("v", key) {
+            self.mark_current_file(true);
+            self.preview_key = None;
+            self.request_preview(false);
+            return Ok(());
+        }
         if self.is("universal", "prevItem", &["<up>"], key)
             || self.is("universal", "prevItem-alt", &["k"], key)
         {
@@ -2621,14 +2788,12 @@ impl App {
             return Ok(());
         }
         if key_matches("<shift+down>", key) || key_matches("<shift+up>", key) {
-            if self.focus == Panel::Files {
-                if let Some(row) = self.row() {
-                    self.marked.insert(row.path.clone());
-                }
+            if matches!(self.focus, Panel::Files | Panel::CommitFiles) {
+                self.mark_current_file(false);
                 self.move_selection(if key.code == KeyCode::Down { 1 } else { -1 });
-                if let Some(row) = self.row() {
-                    self.marked.insert(row.path.clone());
-                }
+                self.mark_current_file(false);
+                self.preview_key = None;
+                self.request_preview(false);
             } else if self.focus == Panel::Commits {
                 self.move_selection(if key.code == KeyCode::Down {
                     self.page_step() as isize
@@ -2738,6 +2903,7 @@ impl App {
                     }
                 }
                 Panel::Files | Panel::CommitFiles | Panel::HeadFiles => self.toggle_file_tab(),
+                Panel::Details | Panel::Output => self.toggle_details_tab(),
                 _ => {}
             }
             self.request_preview(self.focus == Panel::Diff);
@@ -2845,10 +3011,9 @@ impl App {
             Panel::RemoteBranches,
             Panel::Stash,
             Panel::Commits,
-            Panel::Details,
+            self.details_panel(),
             self.file_panel(),
             Panel::Diff,
-            Panel::Output,
         ];
         let index = panels
             .iter()
@@ -2986,9 +3151,7 @@ impl App {
         } else if self.is("files", "openMergeToolForFile", &["<alt+m>"], key) {
             self.external_tool(true)?;
         } else if self.is("universal", "remove", &["d"], key) {
-            let operation =
-                discard_operation(&self.selected_files(), !self.snapshot.head.is_empty())?;
-            self.confirm(operation);
+            self.discard_selected_files()?;
         } else if self.is("files", "viewResetOptions", &["D"], key) {
             self.menu(
                 "Working tree actions",
@@ -3050,20 +3213,34 @@ impl App {
             self.edit_file()?;
         } else if key_matches("o", key) {
             self.open_file()?;
+        } else if self.is("commitFiles", "cherryPickFiles", &["V"], key) {
+            if self.comparison.is_some() {
+                bail!(
+                    "Comparison files are read only. Close the comparison before cherry-picking files."
+                );
+            }
+            self.confirm(Operation::cherry_pick_files(
+                &self.commit_oid,
+                &self.selected_files(),
+            )?);
+        } else if self.is("universal", "remove", &["d"], key) {
+            self.discard_selected_files()?;
         } else if self.is("commitFiles", "checkoutCommitFile", &["c"], key) {
             if self.comparison.is_some() {
                 bail!(
                     "Comparison files are read only. Close the comparison before restoring a commit's file."
                 );
             }
-            if let Some(row) = self.row() {
-                let args = vec![
+            let paths = self.selected_file_paths();
+            if !paths.is_empty() {
+                let mut args = vec![
+                    "--literal-pathspecs".into(),
                     "restore".into(),
                     format!("--source={}", self.commit_oid).into(),
                     "--worktree".into(),
                     "--".into(),
-                    row.path.as_os_str().to_owned(),
                 ];
+                args.extend(paths.into_iter().map(PathBuf::into_os_string));
                 self.confirm(Operation::git(args));
             }
         }

@@ -241,10 +241,12 @@ fn branch_menu_marks_two_selections_opens_read_only_files_and_restores_graph() {
     app.select_list_row(Panel::CommitFiles, shared);
     wait(&mut app, |app| !app.preview_loading);
     assert!(app.preview.text.contains("-main\n+feature"));
-    key(&mut app, KeyCode::Char('c'));
-    assert!(matches!(app.modal, Some(Modal::Message(_))));
-    assert!(app.busy.is_none());
-    key(&mut app, KeyCode::Esc);
+    for action in ['c', 'V', 'd'] {
+        key(&mut app, KeyCode::Char(action));
+        assert!(matches!(app.modal, Some(Modal::Message(_))));
+        assert!(app.busy.is_none());
+        key(&mut app, KeyCode::Esc);
+    }
     key(&mut app, KeyCode::Enter);
     assert!(app.fullscreen);
     key(&mut app, KeyCode::Char(' '));

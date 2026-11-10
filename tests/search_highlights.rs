@@ -164,9 +164,9 @@ fn graph_highlights_only_matches_while_typing_and_after_accepting_with_metadata_
             assert!(!highlighted(&terminal, x + 4, y));
             let (cfg_x, cfg_y) = find(&terminal, graph, "cfg");
             assert!((0..3).all(|offset| highlighted(&terminal, cfg_x + offset, cfg_y)));
-            let (date_x, date_y) = find(&terminal, graph, "26 Nov 2026");
+            let (date_x, date_y) = find(&terminal, graph, "26 Nov 2026 12:00");
             assert_eq!(date_y, y);
-            assert_eq!(date_x + 11, graph.right() - 1);
+            assert_eq!(date_x + 17, graph.right() - 1);
             assert!(!highlighted(&terminal, date_x, date_y));
             for column in graph.x + 1..graph.right() - 1 {
                 if terminal.backend().buffer()[(column, y)].symbol() == "…" {
