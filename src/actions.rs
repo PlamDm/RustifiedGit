@@ -284,7 +284,7 @@ impl Catalog<'_> {
                 "Tree / flat view",
                 "Switch the committed-file list between a tree and flat paths.",
             );
-            if selected && writable && app.comparison.is_none() {
+            if selected && writable && app.comparison.is_none() && !app.stash_inspection_active() {
                 self.add(
                     "commitFiles",
                     "cherryPickFiles",
@@ -307,11 +307,13 @@ impl Catalog<'_> {
                     "Confirm restoring this commit's version into the working tree.",
                 );
             }
-            self.key(
-                "v",
-                "Mark / unmark",
-                "Toggle this path in the multiple-file selection.",
-            );
+            if !app.stash_inspection_active() {
+                self.key(
+                    "v",
+                    "Mark / unmark",
+                    "Toggle this path in the multiple-file selection.",
+                );
+            }
             self.add(
                 "files",
                 "collapseAll",

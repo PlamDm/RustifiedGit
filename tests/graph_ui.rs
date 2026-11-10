@@ -109,6 +109,53 @@ fn screen(app: &mut App, width: u16, height: u16) -> String {
 }
 
 #[test]
+fn browsing_stashes_updates_file_pane_and_keeps_it_active_after_refresh() {
+    let (_dir, mut app, _) = fixture();
+    let root = app.repo.root.clone();
+    git(&root, &["stash", "push", "-qm", "main changes"]);
+    fs::write(root.join("base.txt"), "saved base change\n").unwrap();
+    git(&root, &["stash", "push", "-qm", "base changes"]);
+    app.refresh();
+    wait(&mut app, |app| !app.loading);
+
+    key(&mut app, KeyCode::Char('4'));
+    wait(&mut app, |app| !app.stash_inspection_loading());
+    assert_eq!(app.file_panel(), Panel::CommitFiles);
+    assert!(
+        app.file_rows(Panel::CommitFiles)
+            .iter()
+            .any(|row| row.path == Path::new("base.txt"))
+    );
+    key(&mut app, KeyCode::Down);
+    wait(&mut app, |app| !app.stash_inspection_loading());
+    assert!(
+        app.file_rows(Panel::CommitFiles)
+            .iter()
+            .any(|row| row.path == Path::new("main.txt"))
+    );
+    assert!(
+        !app.file_rows(Panel::CommitFiles)
+            .iter()
+            .any(|row| row.path == Path::new("base.txt"))
+    );
+
+    key(&mut app, KeyCode::Char('7'));
+    assert_eq!(app.focus, Panel::CommitFiles);
+    app.refresh();
+    wait(&mut app, |app| !app.loading);
+    assert_eq!(app.focus, Panel::CommitFiles);
+    assert!(app.stash_inspection_active());
+    key(&mut app, KeyCode::Enter);
+    wait(&mut app, |app| !app.preview_loading);
+    assert_eq!(app.focus, Panel::Diff);
+    assert!(app.preview.text.contains("+working change"));
+    assert!(app.preview.text.contains("-main"));
+
+    key(&mut app, KeyCode::Char('5'));
+    assert!(!app.stash_inspection_active());
+}
+
+#[test]
 fn numbered_panes_and_tab_order_cover_the_layout() {
     let (_dir, mut app, _) = fixture();
     for (number, panel) in [

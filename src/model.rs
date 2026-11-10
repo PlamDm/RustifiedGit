@@ -207,6 +207,10 @@ pub enum PreviewTarget {
     Commit(String),
     Reference(String),
     Stash(String),
+    StashFile {
+        oid: String,
+        path: PathBuf,
+    },
     Status,
 }
 

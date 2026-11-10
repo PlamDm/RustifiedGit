@@ -346,6 +346,53 @@ fn selected_merge_commit_files_use_the_first_parent_diff() {
 }
 
 #[test]
+fn stash_file_inspection_uses_original_base_and_includes_untracked_files() {
+    let fixture = Fixture::new();
+    fixture.write("tracked.txt", "original base\n");
+    fixture.write("other.txt", "other base\n");
+    fixture.commit("base");
+    fixture.write("tracked.txt", "saved tracked\n");
+    fixture.write("other.txt", "saved other\n");
+    fixture.write("new file.txt", "saved untracked\n");
+    git(fixture.dir.path(), ["stash", "push", "-u", "-m", "saved"]);
+    let oid = fixture.snapshot().stashes[0].oid.clone();
+    fixture.write("tracked.txt", "later HEAD\n");
+    fixture.commit("advance HEAD");
+
+    let files = fixture
+        .repo
+        .stash_files(&oid, &Cancellation::default())
+        .unwrap();
+    assert_eq!(files.len(), 3);
+    for (path, expected) in [
+        ("tracked.txt", "+saved tracked"),
+        ("new file.txt", "+saved untracked"),
+    ] {
+        assert!(files.iter().any(|file| file.path == Path::new(path)));
+        let preview = fixture
+            .repo
+            .preview(
+                &PreviewTarget::StashFile {
+                    oid: oid.clone(),
+                    path: path.into(),
+                },
+                true,
+                &GuiConfig::default(),
+                3,
+                false,
+                &Cancellation::default(),
+            )
+            .unwrap();
+        assert!(preview.text.contains(expected), "{}", preview.text);
+        assert!(!preview.text.contains("later HEAD"));
+        assert!(!preview.text.contains("saved other"));
+        if path == "tracked.txt" {
+            assert!(preview.text.contains("-original base"));
+        }
+    }
+}
+
+#[test]
 fn clean_repository_keeps_all_tracked_files_and_honors_ignored_toggle() {
     let fixture = Fixture::new();
     fixture.write("nested/clean.txt", "clean\n");

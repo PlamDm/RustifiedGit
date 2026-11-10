@@ -136,6 +136,11 @@ pub struct App {
     pub commit_rows: Vec<Row>,
     pub commit_files: Vec<FileEntry>,
     pub commit_oid: String,
+    stash_rows: Vec<Row>,
+    stash_files: Vec<FileEntry>,
+    stash_inspection_oid: Option<String>,
+    stash_inspection_loading: bool,
+    stash_context: bool,
     pub comparison: Option<ComparisonInfo>,
     pub comparison_loading: bool,
     pub comparison_mark: Option<Revision>,
@@ -268,6 +273,11 @@ impl App {
             commit_rows: Vec::new(),
             commit_files: Vec::new(),
             commit_oid: String::new(),
+            stash_rows: Vec::new(),
+            stash_files: Vec::new(),
+            stash_inspection_oid: None,
+            stash_inspection_loading: false,
+            stash_context: false,
             comparison: None,
             comparison_loading: false,
             comparison_mark: None,
@@ -349,7 +359,9 @@ impl App {
         self.config.binding(group, action, defaults, key)
     }
     pub fn file_panel(&self) -> Panel {
-        if self.head_tree_tab {
+        if self.stash_context {
+            Panel::CommitFiles
+        } else if self.head_tree_tab {
             Panel::HeadFiles
         } else if self.graph_working_tree && self.comparison.is_none() {
             Panel::Files
@@ -392,6 +404,9 @@ impl App {
         }
     }
     pub fn file_is_marked(&self, path: &Path) -> bool {
+        if self.stash_context {
+            return false;
+        }
         let marks = match self.file_panel() {
             Panel::Files => &self.marked,
             Panel::CommitFiles => &self.marked_commit_files,
@@ -409,6 +424,9 @@ impl App {
         true
     }
     fn mark_current_file(&mut self, toggle: bool) {
+        if self.stash_context {
+            return;
+        }
         if let Some(path) = self.row().map(|row| row.path.clone()) {
             let marks = self.file_marks_mut();
             if !toggle || !marks.remove(&path) {
@@ -419,6 +437,7 @@ impl App {
     fn set_all_directories(&mut self, collapse: Option<bool>) {
         let files = match self.file_panel() {
             Panel::HeadFiles => &self.head_files,
+            Panel::CommitFiles if self.stash_context => &self.stash_files,
             Panel::CommitFiles => &self.commit_files,
             _ => &self.snapshot.files,
         };
@@ -483,9 +502,20 @@ impl App {
     }
     pub fn apply_snapshot(&mut self, snapshot: Snapshot) {
         let selected_oid = self.selected_commit().map(|commit| commit.oid.clone());
+        let selected_stash_oid = self
+            .stash_context
+            .then(|| self.selected_stash().map(|stash| stash.oid.clone()))
+            .flatten();
         let files_changed = self.snapshot.files != snapshot.files;
         self.snapshot = Arc::new(snapshot);
         self.request_head_tree();
+        if let Some(oid) = selected_stash_oid {
+            self.selections[4] = self
+                .filtered_stashes()
+                .iter()
+                .position(|index| self.snapshot.stashes[*index].oid == oid)
+                .unwrap_or(0);
+        }
         if self.options.visible_refs.is_none() {
             self.options.visible_refs = Some(vec![
                 self.snapshot
@@ -513,6 +543,7 @@ impl App {
         }
         self.clamp_selections();
         self.sync_inspection();
+        self.request_stash_files();
         self.preview_key = None;
         self.request_preview(self.focus == Panel::Diff);
         self.dirty = true;
@@ -542,6 +573,81 @@ impl App {
             self.search(Panel::CommitFiles),
             false,
         );
+    }
+    fn rebuild_stash_rows(&mut self) {
+        self.stash_rows = tree::rows(
+            &self.stash_files,
+            self.config.gui.show_file_tree,
+            true,
+            &self.collapsed,
+            self.search(Panel::CommitFiles),
+            false,
+        );
+        self.selections[7] = self.selections[7].min(self.stash_rows.len().saturating_sub(1));
+    }
+    fn clear_stash_inspection(&mut self) {
+        self.stash_context = false;
+        self.workers.stash_files.cancel();
+        self.stash_inspection_oid = None;
+        self.stash_inspection_loading = false;
+        self.stash_files.clear();
+        self.stash_rows.clear();
+    }
+    fn request_stash_files(&mut self) {
+        if !self.stash_context {
+            return;
+        }
+        let Some(stash) = self.selected_stash() else {
+            self.workers.stash_files.cancel();
+            self.stash_inspection_oid = None;
+            self.stash_inspection_loading = false;
+            self.stash_files.clear();
+            self.stash_rows.clear();
+            self.selections[7] = 0;
+            return;
+        };
+        let oid = stash.oid.clone();
+        if self.stash_inspection_oid.as_ref() == Some(&oid) {
+            return;
+        }
+        self.stash_inspection_oid = Some(oid.clone());
+        self.stash_files.clear();
+        self.stash_rows.clear();
+        self.stash_inspection_loading = true;
+        self.selections[7] = 0;
+        self.scrolls[7] = 0;
+        self.workers.stash_files.submit(oid);
+    }
+    pub fn file_rows(&self, panel: Panel) -> &[Row] {
+        match panel {
+            Panel::Files => &self.rows,
+            Panel::HeadFiles => &self.head_rows,
+            Panel::CommitFiles if self.stash_context => &self.stash_rows,
+            _ => &self.commit_rows,
+        }
+    }
+    pub fn stash_file_title(&self) -> String {
+        self.stash_inspection_oid
+            .as_ref()
+            .and_then(|oid| {
+                self.snapshot
+                    .stashes
+                    .iter()
+                    .find(|stash| &stash.oid == oid)
+                    .map(|stash| stash.subject.clone())
+            })
+            .or_else(|| {
+                self.stash_inspection_oid
+                    .as_ref()
+                    .map(|oid| oid[..oid.len().min(8)].to_owned())
+            })
+            .unwrap_or_else(|| "no stash selected".into())
+    }
+    pub fn stash_inspection_active(&self) -> bool {
+        self.stash_context
+    }
+    pub fn stash_inspection_loading(&self) -> bool {
+        self.stash_inspection_loading
     }
     fn rebuild_head_rows(&mut self) {
         self.head_rows = tree::rows(
@@ -685,6 +791,7 @@ impl App {
 
     pub fn start_comparison(&mut self, request: ComparisonRequest) {
         self.marked_commit_files.clear();
+        self.clear_stash_inspection();
         self.workers.commit_files.cancel();
         self.workers.preview.cancel();
         self.inspection_oid = None;
@@ -872,10 +979,10 @@ impl App {
             }
             self.commit_details = None;
             self.inspection_loading = false;
-            if self.focus == Panel::CommitFiles && !self.head_tree_tab {
+            if self.focus == Panel::CommitFiles && !self.head_tree_tab && !self.stash_context {
                 self.focus = Panel::Files;
             }
-            if self.focus != Panel::Stash && !self.head_tree_tab {
+            if self.focus != Panel::Stash && !self.head_tree_tab && !self.stash_context {
                 self.side = Panel::Files;
             }
         } else if let Some(oid) = self.selected_commit().map(|commit| commit.oid.clone()) {
@@ -892,7 +999,7 @@ impl App {
                 self.scrolls[9] = 0;
                 self.workers.commit_files.submit(oid);
             }
-            if self.focus != Panel::Stash && !self.head_tree_tab {
+            if self.focus != Panel::Stash && !self.head_tree_tab && !self.stash_context {
                 self.side = Panel::CommitFiles;
             }
         } else {
@@ -903,7 +1010,7 @@ impl App {
             self.commit_details = None;
             self.inspection_oid = None;
         }
-        if self.head_tree_tab && self.focus != Panel::Stash {
+        if self.head_tree_tab && self.focus != Panel::Stash && !self.stash_context {
             self.side = Panel::HeadFiles;
         }
         self.update_details();
@@ -938,6 +1045,7 @@ impl App {
         }
     }
     pub fn select_graph_row(&mut self, logical_index: usize) {
+        self.clear_stash_inspection();
         self.close_comparison();
         self.focus = Panel::Commits;
         let worktree_index = self.working_tree_graph_index();
@@ -964,6 +1072,9 @@ impl App {
         }
         self.set_focus(panel);
         self.selections[panel_index(panel)] = index.min(self.length(panel).saturating_sub(1));
+        if panel == Panel::Stash {
+            self.request_stash_files();
+        }
         if !matches!(
             panel,
             Panel::Status | Panel::Branches | Panel::RemoteBranches | Panel::Details
@@ -982,7 +1093,8 @@ impl App {
         if self.side == Panel::HeadFiles {
             self.head_rows.get(self.selected(Panel::HeadFiles))
         } else if self.side == Panel::CommitFiles {
-            self.commit_rows.get(self.selected(Panel::CommitFiles))
+            self.file_rows(Panel::CommitFiles)
+                .get(self.selected(Panel::CommitFiles))
         } else {
             self.rows.get(self.selected(Panel::Files))
         }
@@ -1200,7 +1312,7 @@ impl App {
     fn length(&self, panel: Panel) -> usize {
         match panel {
             Panel::Files => self.rows.len(),
-            Panel::CommitFiles => self.commit_rows.len(),
+            Panel::CommitFiles => self.file_rows(panel).len(),
             Panel::HeadFiles => self.head_rows.len(),
             Panel::Branches if self.branch_tab == 3 => self.snapshot.worktrees.len(),
             Panel::Branches => self.branch_rows(false).len(),
@@ -1233,6 +1345,7 @@ impl App {
             }
         }
         self.rebuild_commit_rows();
+        self.rebuild_stash_rows();
         self.rebuild_head_rows();
         self.clamp_selections();
         self.dirty = true;
@@ -1371,6 +1484,16 @@ impl App {
                     to: info.to_oid.clone(),
                     path: row.path.clone(),
                     old_path: file.and_then(|file| file.old_path.clone()),
+                });
+            }
+            if let Some(oid) = &self.stash_inspection_oid {
+                let row = self.row()?;
+                if row.directory {
+                    return None;
+                }
+                return Some(PreviewTarget::StashFile {
+                    oid: oid.clone(),
+                    path: row.path.clone(),
                 });
             }
             if !self.marked_commit_files.is_empty() {
@@ -1628,6 +1751,23 @@ impl App {
                         }
                     }
                 }
+                WorkerEvent::StashFiles(id, oid, result)
+                    if id == self.workers.stash_files.current()
+                        && self.stash_inspection_oid.as_ref() == Some(&oid) =>
+                {
+                    self.stash_inspection_loading = false;
+                    match result {
+                        Ok(files) => {
+                            self.stash_files = files;
+                            self.rebuild_stash_rows();
+                            self.preview_key = None;
+                            self.request_preview(self.focus == Panel::Diff);
+                        }
+                        Err(error) => {
+                            self.error(format!("Loading stashed files: {error}"));
+                        }
+                    }
+                }
                 WorkerEvent::HeadTree(id, oid, result)
                     if id == self.workers.head_tree.current()
                         && self.head_requested.as_ref() == Some(&oid) =>
@@ -1767,7 +1907,18 @@ impl App {
         }
     }
     pub fn set_focus(&mut self, panel: Panel) {
-        if panel == Panel::Commits {
+        if matches!(
+            panel,
+            Panel::Status
+                | Panel::Files
+                | Panel::HeadFiles
+                | Panel::Branches
+                | Panel::RemoteBranches
+                | Panel::Commits
+        ) {
+            self.clear_stash_inspection();
+        }
+        if matches!(panel, Panel::Commits | Panel::Stash) {
             self.close_comparison();
         }
         if self
@@ -1790,7 +1941,10 @@ impl App {
             self.sync_inspection();
         }
         if panel == Panel::Stash {
+            self.stash_context = true;
+            self.head_tree_tab = false;
             self.side = Panel::Stash;
+            self.request_stash_files();
         }
         if panel == Panel::Output {
             self.state.hide_command_log = false;
@@ -1844,6 +1998,9 @@ impl App {
             ) {
                 self.request_preview(false);
             }
+            if self.focus == Panel::Stash {
+                self.request_stash_files();
+            }
         }
         self.dirty = true;
     }
@@ -1885,9 +2042,16 @@ impl App {
                 self.sync_inspection();
             }
             Panel::Files => self.rebuild(),
-            Panel::CommitFiles => self.rebuild_commit_rows(),
+            Panel::CommitFiles => {
+                if self.stash_context {
+                    self.rebuild_stash_rows();
+                } else {
+                    self.rebuild_commit_rows();
+                }
+            }
             Panel::HeadFiles => self.rebuild_head_rows(),
             Panel::Branches | Panel::RemoteBranches => self.rebuild_branch_rows(),
+            Panel::Stash => self.request_stash_files(),
             _ => {}
         }
         self.diff_line = 0;
@@ -1923,6 +2087,9 @@ impl App {
                 self.clamp_selections();
                 if edit.panel == Panel::Commits {
                     self.sync_inspection();
+                }
+                if edit.panel == Panel::Stash {
+                    self.request_stash_files();
                 }
                 self.preview_key = None;
                 self.request_preview(false);
@@ -1991,7 +2158,11 @@ impl App {
         let count = match panel {
             Panel::Commits => self.filtered_commits().len(),
             Panel::Files => self.rows.iter().filter(|row| !row.directory).count(),
-            Panel::CommitFiles => self.commit_rows.iter().filter(|row| !row.directory).count(),
+            Panel::CommitFiles => self
+                .file_rows(panel)
+                .iter()
+                .filter(|row| !row.directory)
+                .count(),
             Panel::HeadFiles => self.head_rows.iter().filter(|row| !row.directory).count(),
             Panel::Branches if self.branch_tab != 3 => self.refs_for(false).len(),
             Panel::RemoteBranches => self.refs_for(true).len(),
@@ -2037,7 +2208,9 @@ impl App {
         });
     }
     fn selected_files(&self) -> Vec<&FileEntry> {
-        let files = if self.side == Panel::CommitFiles {
+        let files = if self.stash_context && self.side == Panel::CommitFiles {
+            &self.stash_files
+        } else if self.side == Panel::CommitFiles {
             &self.commit_files
         } else {
             &self.snapshot.files
@@ -2054,6 +2227,9 @@ impl App {
             .unwrap_or_default()
     }
     fn discard_selected_files(&mut self) -> Result<()> {
+        if self.stash_context {
+            bail!("Stashed files are read only; apply the stash before discarding a file");
+        }
         if self.comparison.is_some() {
             bail!(
                 "Comparison files are read only. Close the comparison before discarding changes."
@@ -3214,6 +3390,9 @@ impl App {
         } else if key_matches("o", key) {
             self.open_file()?;
         } else if self.is("commitFiles", "cherryPickFiles", &["V"], key) {
+            if self.stash_context {
+                bail!("Stashed files are read only; apply the stash from pane 4");
+            }
             if self.comparison.is_some() {
                 bail!(
                     "Comparison files are read only. Close the comparison before cherry-picking files."
@@ -3226,6 +3405,9 @@ impl App {
         } else if self.is("universal", "remove", &["d"], key) {
             self.discard_selected_files()?;
         } else if self.is("commitFiles", "checkoutCommitFile", &["c"], key) {
+            if self.stash_context {
+                bail!("Stashed files are read only; apply the stash before restoring a file");
+            }
             if self.comparison.is_some() {
                 bail!(
                     "Comparison files are read only. Close the comparison before restoring a commit's file."
@@ -3351,6 +3533,9 @@ impl App {
             self.selections[index] = self.selections[index]
                 .saturating_add_signed(delta)
                 .min(self.length(self.side).saturating_sub(1));
+            if self.side == Panel::Stash {
+                self.request_stash_files();
+            }
             self.diff_line = 0;
             self.diff_scroll = 0;
             self.request_preview(true);
@@ -3908,7 +4093,9 @@ impl App {
             "--no-prompt".into(),
         ];
         if !merge && self.side == Panel::CommitFiles {
-            if let Some(info) = &self.comparison {
+            if let Some(oid) = &self.stash_inspection_oid {
+                args.extend([format!("{}^", oid).into(), oid.clone().into()]);
+            } else if let Some(info) = &self.comparison {
                 args.extend([info.diff_base().into(), info.to_oid.clone().into()]);
             } else {
                 args.extend([

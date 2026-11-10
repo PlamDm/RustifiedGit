@@ -627,6 +627,21 @@ impl Repository {
             .collect())
     }
 
+    pub fn stash_files(&self, oid: &str, cancel: &Cancellation) -> Result<Vec<FileEntry>> {
+        let output = self.read(
+            [
+                "stash",
+                "show",
+                "--name-status",
+                "--include-untracked",
+                "-z",
+                oid,
+            ],
+            cancel,
+        )?;
+        Ok(parse_changed_files(&output.stdout))
+    }
+
     pub fn worktrees(&self, cancel: &Cancellation) -> Result<Vec<Worktree>> {
         let output = self.read(["worktree", "list", "--porcelain", "-z"], cancel)?;
         let mut result = Vec::new();
@@ -891,7 +906,9 @@ impl Repository {
         let mut staged = false;
         let file = matches!(
             target,
-            PreviewTarget::File { .. } | PreviewTarget::CommitFiles { .. }
+            PreviewTarget::File { .. }
+                | PreviewTarget::CommitFiles { .. }
+                | PreviewTarget::StashFile { .. }
         );
         if let PreviewTarget::File {
             path,
@@ -906,6 +923,28 @@ impl Repository {
                     path,
                     old_path.as_deref(),
                     commit.as_deref(),
+                    settings.diff_preview_max_file_bytes,
+                    cancel,
+                )?
+            {
+                return Ok(Preview {
+                    title,
+                    text: format!(
+                        "Automatic preview skipped: a file version exceeds {} bytes.\nPress 0 or Enter to open it, or Ctrl+t for the external diff tool.",
+                        settings.diff_preview_max_file_bytes
+                    ),
+                    suppressed: true,
+                    ..Preview::default()
+                });
+            }
+        }
+        if let PreviewTarget::StashFile { oid, path } = target {
+            title = format!("{} · stash", path.display());
+            if !explicit
+                && self.file_too_large(
+                    path,
+                    None,
+                    Some(oid),
                     settings.diff_preview_max_file_bytes,
                     cancel,
                 )?
@@ -1077,6 +1116,44 @@ impl Repository {
                     reference.into(),
                     "--".into(),
                 ]);
+            }
+            PreviewTarget::StashFile { oid, path } => {
+                title = format!("{} · stash", path.display());
+                // Untracked stash files live in a separate, parentless commit.
+                let untracked = process::run(
+                    &self.root,
+                    &CommandSpec::git([
+                        "cat-file".into(),
+                        "-e".into(),
+                        OsString::from(format!("{oid}^3:{}", path.to_string_lossy())),
+                    ]),
+                    cancel,
+                    4096,
+                    None,
+                    READ_TIMEOUT,
+                )?
+                .code
+                    == 0;
+                if untracked {
+                    args.extend([
+                        "show".into(),
+                        "--format=".into(),
+                        "--root".into(),
+                        format!("{oid}^3").into(),
+                    ]);
+                } else {
+                    args.extend(["diff".into(), format!("{oid}^1").into(), oid.into()]);
+                }
+                args.extend([
+                    "--no-color".into(),
+                    "--no-ext-diff".into(),
+                    "--no-textconv".into(),
+                    format!("--unified={context}").into(),
+                ]);
+                if ignore_whitespace {
+                    args.push("--ignore-all-space".into());
+                }
+                args.extend(["--".into(), path.as_os_str().to_owned()]);
             }
             PreviewTarget::Status => {
                 title = "Repository status".into();

@@ -991,11 +991,7 @@ fn draw_files(frame: &mut Frame, area: Rect, app: &mut App) {
     }
     let panel = app.file_panel();
     let selected = app.selected(panel);
-    let total = match panel {
-        Panel::Files => app.rows.len(),
-        Panel::HeadFiles => app.head_rows.len(),
-        _ => app.commit_rows.len(),
-    };
+    let total = app.file_rows(panel).len();
     let range = viewport(
         app,
         panel,
@@ -1003,11 +999,7 @@ fn draw_files(frame: &mut Frame, area: Rect, app: &mut App) {
         selected,
         area.height.saturating_sub(2) as usize,
     );
-    let rows = match panel {
-        Panel::Files => &app.rows,
-        Panel::HeadFiles => &app.head_rows,
-        _ => &app.commit_rows,
-    };
+    let rows = app.file_rows(panel);
     let query = crate::fuzzy::Query::new(app.search(panel));
     let items = rows[range.clone()]
         .iter()
@@ -1026,7 +1018,17 @@ fn draw_files(frame: &mut Frame, area: Rect, app: &mut App) {
             file_line(row, app, &query, match_path)
         })
         .collect();
-    let title = if panel == Panel::HeadFiles {
+    let title = if app.stash_inspection_active() {
+        format!(
+            "7 [Stash] | {}{}",
+            clean(&app.stash_file_title()),
+            if app.stash_inspection_loading() {
+                " …"
+            } else {
+                ""
+            }
+        )
+    } else if panel == Panel::HeadFiles {
         format!(
             "7 Changes | [HEAD tree]{}",
             if app.head_loading { " …" } else { "" }
@@ -1069,6 +1071,10 @@ fn draw_files(frame: &mut Frame, area: Rect, app: &mut App) {
     if total == 0 && area.height > 3 {
         let text = if !app.search(panel).is_empty() {
             "No matching files."
+        } else if app.stash_inspection_active() && app.stash_inspection_loading() {
+            "Loading stashed files…"
+        } else if app.stash_inspection_active() {
+            "This stash has no changed files."
         } else if panel == Panel::HeadFiles && app.head_loading {
             "Loading HEAD tree…"
         } else if panel == Panel::HeadFiles {

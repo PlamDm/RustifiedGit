@@ -90,6 +90,7 @@ pub enum WorkerEvent {
     History(u64, Result<HistoryPage, String>),
     Preview(u64, Result<Preview, String>),
     CommitFiles(u64, String, Result<CommitInspection, String>),
+    StashFiles(u64, String, Result<Vec<FileEntry>, String>),
     Comparison(u64, Result<ComparisonResult, String>),
     HeadTree(u64, String, Result<Vec<FileEntry>, String>),
     CommandDone(Result<String, String>),
@@ -111,6 +112,7 @@ pub struct Workers {
     pub history: Latest<ReadOptions>,
     pub preview: Latest<PreviewRequest>,
     pub commit_files: Latest<String>,
+    pub stash_files: Latest<String>,
     pub comparison: Latest<ComparisonRequest>,
     pub head_tree: Latest<String>,
     pub commands: Sender<CommandRequest>,
@@ -187,6 +189,16 @@ impl Workers {
                 let _ = files_events.send(WorkerEvent::CommitFiles(id, oid, result));
             }
         });
+        let stash_repo = repo.clone();
+        let stash_events = events.clone();
+        let stash_files = Latest::spawn(move |id, oid: String, cancel: Cancellation| {
+            let result = stash_repo
+                .stash_files(&oid, &cancel)
+                .map_err(|error| format!("{error:#}"));
+            if !cancel.is_cancelled() {
+                let _ = stash_events.send(WorkerEvent::StashFiles(id, oid, result));
+            }
+        });
         let comparison_repo = repo.clone();
         let comparison_events = events.clone();
         let comparison = Latest::spawn(
@@ -230,6 +242,7 @@ impl Workers {
             history,
             preview,
             commit_files,
+            stash_files,
             comparison,
             head_tree,
             commands,
