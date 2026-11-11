@@ -3,7 +3,7 @@ use crate::{
     model::{
         Commit, CommitDetails, CommitInspection, ComparisonInfo, ComparisonRequest,
         ComparisonResult, FileEntry, Preview, PreviewTarget, RefKind, Reference, Snapshot, Stash,
-        Worktree,
+        Submodule, Worktree,
     },
     process::{self, Cancellation, CommandSpec, Output, os_path},
 };
@@ -46,6 +46,7 @@ pub struct ReadOptions {
 pub struct Repository {
     pub root: PathBuf,
     pub git_dir: PathBuf,
+    pub superproject: Option<PathBuf>,
     tracked: TrackedCache,
     tree: TreeCache,
 }
@@ -233,12 +234,22 @@ impl Repository {
             .success()?;
             Ok(PathBuf::from(os_path(without_newline(&output.stdout))))
         };
-        let root = query("--show-toplevel")
-            .context("Open a Git working tree with -p PATH, or run git init first")?;
-        let git_dir = query("--absolute-git-dir")?;
+        let (root, git_dir, superproject) = thread::scope(|scope| {
+            let git_dir = scope.spawn(|| query("--absolute-git-dir"));
+            let superproject = scope.spawn(|| query("--show-superproject-working-tree"));
+            (
+                query("--show-toplevel"),
+                git_dir.join().unwrap(),
+                superproject.join().unwrap(),
+            )
+        });
+        let root = root.context("Open a Git working tree with -p PATH, or run git init first")?;
+        let git_dir = git_dir?;
+        let superproject = superproject?;
         Ok(Self {
             root,
             git_dir,
+            superproject: (!superproject.as_os_str().is_empty()).then_some(superproject),
             tracked: Arc::new(Mutex::new(None)),
             tree: Arc::new(Mutex::new(None)),
         })
@@ -422,16 +433,14 @@ impl Repository {
             (status, tracked.join().unwrap())
         });
         let (changed, branch) = parse_status(&status?.stdout)?;
-        let mut files: BTreeMap<PathBuf, FileEntry> = tracked?
-            .into_iter()
-            .map(|path| (path.clone(), FileEntry::clean(path)))
+        let old_paths: HashSet<_> = changed
+            .iter()
+            .filter_map(|file| file.old_path.clone())
             .collect();
-        for file in changed {
-            if let Some(old) = &file.old_path {
-                files.remove(old);
-            }
-            files.insert(file.path.clone(), file);
-        }
+        let mut updates: BTreeMap<_, _> = changed
+            .into_iter()
+            .map(|file| (file.path.clone(), file))
+            .collect();
         if ignored {
             let output = self.read(
                 [
@@ -449,7 +458,7 @@ impl Repository {
                 .filter(|path| !path.is_empty())
             {
                 let path = PathBuf::from(os_path(path));
-                files.entry(path.clone()).or_insert(FileEntry {
+                updates.entry(path.clone()).or_insert(FileEntry {
                     path,
                     old_path: None,
                     index: b'!',
@@ -457,7 +466,20 @@ impl Repository {
                 });
             }
         }
-        Ok((files.into_values().collect(), branch))
+        let tracked = tracked?;
+        let mut files = Vec::with_capacity(tracked.len() + updates.len());
+        for path in tracked {
+            if let Some(file) = updates.remove(&path) {
+                files.push(file);
+            } else if !old_paths.contains(&path) {
+                files.push(FileEntry::clean(path));
+            }
+        }
+        if !updates.is_empty() {
+            files.extend(updates.into_values());
+            files.sort_unstable_by(|left, right| left.path.cmp(&right.path));
+        }
+        Ok((files, branch))
     }
 
     pub fn references(&self, cancel: &Cancellation) -> Result<Vec<Reference>> {
@@ -671,8 +693,79 @@ impl Repository {
         Ok(result)
     }
 
+    pub fn submodules(&self, cancel: &Cancellation) -> Result<Vec<Submodule>> {
+        if !self.root.join(".gitmodules").is_file() {
+            return Ok(Vec::new());
+        }
+        let output = process::run(
+            &self.root,
+            &CommandSpec::git([
+                "config",
+                "--null",
+                "--file",
+                ".gitmodules",
+                "--get-regexp",
+                r"^submodule\..*\.(path|url)$",
+            ]),
+            cancel,
+            READ_LIMIT,
+            None,
+            READ_TIMEOUT,
+        )?;
+        // git config returns 1 when the file has no matching entries.
+        if output.code == 1 && output.stdout.is_empty() && output.stderr.is_empty() {
+            return Ok(Vec::new());
+        }
+        let output = output.success()?;
+        if output.truncated {
+            bail!("Submodule configuration exceeded the read limit");
+        }
+        let mut modules: BTreeMap<String, Submodule> = BTreeMap::new();
+        for record in output
+            .stdout
+            .split(|byte| *byte == 0)
+            .filter(|record| !record.is_empty())
+        {
+            cancel.check()?;
+            let Some(separator) = record.iter().position(|byte| *byte == b'\n') else {
+                continue;
+            };
+            let key = String::from_utf8_lossy(&record[..separator]);
+            let Some(key) = key.strip_prefix("submodule.") else {
+                continue;
+            };
+            let Some((name, property)) = key.rsplit_once('.') else {
+                continue;
+            };
+            let module = modules.entry(name.to_owned()).or_insert_with(|| Submodule {
+                name: name.to_owned(),
+                ..Submodule::default()
+            });
+            let value = &record[separator + 1..];
+            match property {
+                "path" => module.path = PathBuf::from(os_path(value)),
+                "url" => module.url = String::from_utf8_lossy(value).into_owned(),
+                _ => {}
+            }
+        }
+        let mut modules: Vec<_> = modules
+            .into_values()
+            .filter(|module| {
+                !module.path.as_os_str().is_empty()
+                    && module.path.components().all(|component| {
+                        matches!(component, Component::Normal(_) | Component::CurDir)
+                    })
+            })
+            .collect();
+        for module in &mut modules {
+            module.initialized = self.root.join(&module.path).join(".git").exists();
+        }
+        modules.sort_by(|left, right| left.path.cmp(&right.path));
+        Ok(modules)
+    }
+
     pub fn snapshot(&self, options: &ReadOptions, cancel: &Cancellation) -> Result<Snapshot> {
-        self.snapshot_inner(options, cancel, true)
+        self.snapshot_inner(options, cancel, true, None)
     }
 
     pub fn status_snapshot(
@@ -680,7 +773,16 @@ impl Repository {
         options: &ReadOptions,
         cancel: &Cancellation,
     ) -> Result<Snapshot> {
-        self.snapshot_inner(options, cancel, false)
+        self.snapshot_inner(options, cancel, false, None)
+    }
+
+    pub(crate) fn status_snapshot_with_refs(
+        &self,
+        options: &ReadOptions,
+        cancel: &Cancellation,
+        references: Option<(Vec<Reference>, String)>,
+    ) -> Result<Snapshot> {
+        self.snapshot_inner(options, cancel, false, references)
     }
 
     pub fn ref_state(&self, cancel: &Cancellation) -> Result<(Vec<Reference>, String)> {
@@ -710,11 +812,17 @@ impl Repository {
         options: &ReadOptions,
         cancel: &Cancellation,
         include_history: bool,
+        ref_state: Option<(Vec<Reference>, String)>,
     ) -> Result<Snapshot> {
         let started = Instant::now();
+        let (known_references, known_head) = ref_state
+            .map_or((None, None), |(references, head)| {
+                (Some(references), Some(head))
+            });
         let (files, refs, commits, stashes, worktrees) = thread::scope(|scope| {
             let files = scope.spawn(|| self.files(options.ignored, cancel));
-            let refs = scope.spawn(|| self.references(cancel));
+            let refs =
+                scope.spawn(move || known_references.map_or_else(|| self.references(cancel), Ok));
             let commits = scope.spawn(|| {
                 if include_history {
                     self.commits(options, cancel)
@@ -733,23 +841,36 @@ impl Repository {
             )
         });
         let (files, branch_description) = files?;
+        let mut submodules = self.submodules(cancel)?;
+        let changed_paths: HashSet<_> = files
+            .iter()
+            .filter(|file| file.changed())
+            .map(|file| file.path.as_path())
+            .collect();
+        for module in &mut submodules {
+            module.changed = changed_paths.contains(module.path.as_path());
+        }
         let references = refs?;
         let current = references.iter().find(|reference| reference.current);
-        let head = match current {
-            Some(reference) => reference.oid.clone(),
-            None => {
-                let output = process::run(
-                    &self.root,
-                    &CommandSpec::git(["rev-parse", "--verify", "HEAD"]),
-                    cancel,
-                    4096,
-                    None,
-                    READ_TIMEOUT,
-                )?;
-                if output.code == 0 {
-                    output.text().trim().to_owned()
-                } else {
-                    String::new()
+        let head = if let Some(head) = known_head {
+            head
+        } else {
+            match current {
+                Some(reference) => reference.oid.clone(),
+                None => {
+                    let output = process::run(
+                        &self.root,
+                        &CommandSpec::git(["rev-parse", "--verify", "HEAD"]),
+                        cancel,
+                        4096,
+                        None,
+                        READ_TIMEOUT,
+                    )?;
+                    if output.code == 0 {
+                        output.text().trim().to_owned()
+                    } else {
+                        String::new()
+                    }
                 }
             }
         };
@@ -776,6 +897,7 @@ impl Repository {
             commits: Arc::new(commits?),
             stashes: stashes?,
             worktrees: worktrees?,
+            submodules,
             branch: branch_description,
             head,
             upstream,
@@ -1675,6 +1797,26 @@ pub fn pull_overwrite_operation() -> Operation {
         label: "Overwrite local branch with its fetched upstream: discard local-only commits and tracked changes; stash submodule changes (keeps unrelated untracked files)".into(),
         steps: commands.into_iter().map(Step::Command).collect(),
     }
+}
+
+pub fn update_submodules_operation(path: Option<&Path>) -> Operation {
+    let mut args: Vec<OsString> = vec![
+        "--literal-pathspecs".into(),
+        "submodule".into(),
+        "update".into(),
+        "--init".into(),
+        "--recursive".into(),
+        "--progress".into(),
+    ];
+    if let Some(path) = path {
+        args.extend(["--".into(), path.as_os_str().to_owned()]);
+    }
+    let mut operation = Operation::git(args);
+    operation.label = path.map_or_else(
+        || "Initialize/update all submodules recursively".into(),
+        |path| format!("Initialize/update submodule {} recursively", path.display()),
+    );
+    operation
 }
 
 pub fn reset_submodule_operation(path: &Path) -> Result<Operation> {

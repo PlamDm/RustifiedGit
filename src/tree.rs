@@ -1,6 +1,7 @@
 use crate::{fuzzy::Query, model::FileEntry};
 use std::{
     collections::{BTreeMap, HashSet},
+    ffi::OsString,
     path::{Path, PathBuf},
 };
 
@@ -18,7 +19,7 @@ pub struct Row {
 
 #[derive(Default)]
 struct Node {
-    children: BTreeMap<String, Node>,
+    children: BTreeMap<OsString, Node>,
     file_index: Option<usize>,
     path: PathBuf,
     changed: bool,
@@ -38,11 +39,7 @@ pub fn rows(
     changed_only: bool,
 ) -> Vec<Row> {
     let query = Query::new(search);
-    let visible = |file: &FileEntry| {
-        (show_unchanged || file.changed() || file.ignored())
-            && (!changed_only || file.changed() || file.ignored())
-            && query.is_match(&file.path.to_string_lossy())
-    };
+    let visible = |file: &FileEntry| file_visible(file, show_unchanged, changed_only, &query);
     if !tree {
         return files
             .iter()
@@ -66,12 +63,7 @@ pub fn rows(
         let mut path = PathBuf::new();
         for component in file.path.components() {
             path.push(component.as_os_str());
-            // Paths stay native in the value; the key only controls display ordering.
-            let key = format!(
-                "{}\0{:?}",
-                component.as_os_str().to_string_lossy(),
-                component.as_os_str()
-            );
+            let key = component.as_os_str().to_owned();
             node = node.children.entry(key).or_insert_with(|| Node {
                 path: path.clone(),
                 ignored: true,
@@ -90,9 +82,17 @@ pub fn rows(
         search: &str,
         output: &mut Vec<Row>,
     ) {
-        let mut children: Vec<_> = node.children.values().collect();
-        children.sort_by_key(|node| (node.children.is_empty(), &node.path));
-        for child in children {
+        // BTreeMap already keeps siblings in native path order.
+        for child in node
+            .children
+            .values()
+            .filter(|child| !child.children.is_empty())
+            .chain(
+                node.children
+                    .values()
+                    .filter(|child| child.children.is_empty()),
+            )
+        {
             let directory = !child.children.is_empty();
             output.push(Row {
                 path: child.path.clone(),
@@ -126,6 +126,17 @@ pub fn rows(
     let mut output = Vec::with_capacity(files.len());
     flatten(&root, files, 0, collapsed, search, &mut output);
     output
+}
+
+pub(crate) fn file_visible(
+    file: &FileEntry,
+    show_unchanged: bool,
+    changed_only: bool,
+    query: &Query,
+) -> bool {
+    (show_unchanged || file.changed() || file.ignored())
+        && (!changed_only || file.changed() || file.ignored())
+        && query.is_match(&file.path.to_string_lossy())
 }
 
 pub fn matching_files<'a>(files: &'a [FileEntry], path: &Path) -> Vec<&'a FileEntry> {

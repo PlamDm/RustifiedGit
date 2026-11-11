@@ -48,6 +48,15 @@ pub struct Query {
     case_sensitive: bool,
 }
 
+#[derive(Default)]
+pub(crate) struct ScoreScratch {
+    normalized: String,
+    characters: Vec<char>,
+    bonuses: Vec<i64>,
+    previous: Vec<i64>,
+    current: Vec<i64>,
+}
+
 impl Query {
     /// Parse once and reuse when filtering or ranking a large list.
     pub fn new(query: &str) -> Self {
@@ -99,7 +108,9 @@ impl Query {
     }
 
     fn normalize<'a>(&self, text: &'a str) -> Cow<'a, str> {
-        if self.case_sensitive {
+        if self.case_sensitive
+            || (text.is_ascii() && !text.bytes().any(|byte| byte.is_ascii_uppercase()))
+        {
             Cow::Borrowed(text)
         } else {
             Cow::Owned(text.to_lowercase())
@@ -166,6 +177,20 @@ impl Query {
     ) -> (Vec<char>, Vec<i64>, Vec<usize>) {
         let mut bonuses = Vec::new();
         let mut original = Vec::new();
+        self.fill_bonuses(text, &mut bonuses, map_original.then_some(&mut original));
+        (normalized.chars().collect(), bonuses, original)
+    }
+
+    fn fill_bonuses(
+        &self,
+        text: &str,
+        bonuses: &mut Vec<i64>,
+        mut original: Option<&mut Vec<usize>>,
+    ) {
+        bonuses.clear();
+        if let Some(original) = original.as_mut() {
+            original.clear();
+        }
         let mut previous: Option<char> = None;
         for (source, character) in text.chars().enumerate() {
             let bonus = match previous {
@@ -181,34 +206,57 @@ impl Query {
             };
             for index in 0..count {
                 bonuses.push(if index == 0 { bonus } else { 0 });
-                if map_original {
+                if let Some(original) = original.as_mut() {
                     original.push(source);
                 }
             }
             previous = Some(character);
         }
-        (normalized.chars().collect(), bonuses, original)
     }
 
     /// Higher scores prefer consecutive matches, word/path boundaries and
     /// earlier matches. `None` means at least one term does not match.
     pub fn score(&self, text: &str) -> Option<i64> {
+        self.score_with_scratch(text, &mut ScoreScratch::default())
+    }
+
+    pub(crate) fn score_with_scratch(&self, text: &str, scratch: &mut ScoreScratch) -> Option<i64> {
         if self.terms.is_empty() {
             return Some(0);
         }
-        let normalized = self.normalize(text);
+        let ScoreScratch {
+            normalized,
+            characters,
+            bonuses,
+            previous,
+            current,
+        } = scratch;
+        let normalized: &str = if self.case_sensitive {
+            text
+        } else {
+            if text.is_ascii() {
+                normalized.clear();
+                normalized.push_str(text);
+                normalized.make_ascii_lowercase();
+            } else {
+                *normalized = text.to_lowercase();
+            }
+            normalized
+        };
         if !self
             .terms
             .iter()
-            .all(|term| term.matches(&normalized) != term.excluded)
+            .all(|term| term.matches(normalized) != term.excluded)
         {
             return None;
         }
-        let (characters, bonuses, _) = self.characters(text, &normalized, false);
+        characters.clear();
+        characters.extend(normalized.chars());
+        self.fill_bonuses(text, bonuses, None);
         let mut total = 0;
         for term in self.terms.iter().filter(|term| !term.excluded) {
             total += match term.kind {
-                Kind::Fuzzy => fuzzy_score(&characters, &bonuses, &term.chars),
+                Kind::Fuzzy => fuzzy_score(characters, bonuses, &term.chars, previous, current),
                 _ => {
                     let byte_position = if matches!(term.kind, Kind::Suffix) {
                         normalized.len() - term.text.len()
@@ -220,7 +268,7 @@ impl Query {
                         - (position as i64).min(24)
                 }
             };
-            if normalized.as_ref() == term.text {
+            if normalized == term.text {
                 total += 40;
             }
         }
@@ -233,10 +281,17 @@ pub fn score(text: &str, query: &str) -> Option<i64> {
     Query::new(query).score(text)
 }
 
-fn fuzzy_score(text: &[char], bonuses: &[i64], needle: &[char]) -> i64 {
+fn fuzzy_score(
+    text: &[char],
+    bonuses: &[i64],
+    needle: &[char],
+    previous: &mut Vec<i64>,
+    current: &mut Vec<i64>,
+) -> i64 {
     const MISS: i64 = i64::MIN / 4;
-    let mut previous = vec![MISS; text.len()];
-    let mut current = vec![MISS; text.len()];
+    previous.resize(text.len(), MISS);
+    previous.fill(MISS);
+    current.resize(text.len(), MISS);
     for (matched, wanted) in needle.iter().enumerate() {
         current.fill(MISS);
         let mut best_gap = MISS;
@@ -259,9 +314,9 @@ fn fuzzy_score(text: &[char], bonuses: &[i64], needle: &[char]) -> i64 {
                 adjacent.max(separated) + bonuses[index]
             };
         }
-        std::mem::swap(&mut previous, &mut current);
+        std::mem::swap(previous, current);
     }
-    previous.into_iter().max().unwrap_or(0)
+    previous.iter().copied().max().unwrap_or(0)
 }
 
 fn fuzzy_positions(text: &[char], bonuses: &[i64], needle: &[char]) -> Vec<usize> {

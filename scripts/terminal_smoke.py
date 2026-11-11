@@ -178,7 +178,7 @@ def main():
             eventually(lambda: json.loads(state_file.read_text()).get("commitLimit") == 300, pump=session.read)
             session.read(0.1)
             session.send("o?")
-            session.until("Numbered")
+            session.until("Keyboard help")
             session.send("\x1b")
             session.read(0.1)
             session.send("5\x1b[H7/work.txt\r")

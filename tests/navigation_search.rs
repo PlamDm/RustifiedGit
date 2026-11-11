@@ -347,6 +347,86 @@ fn file_tabs_keep_head_contents_and_filters_independent_of_hovered_commit() {
 }
 
 #[test]
+fn incremental_and_parallel_commit_search_preserve_full_scan_ranking_and_query_operators() {
+    use rustifiedgit::model::Commit;
+    use std::sync::Arc;
+    let (_dir, mut app, _, _) = fixture();
+    let subjects = [
+        "Parser fix",
+        "parser tests",
+        "path refactor",
+        "Parse docs",
+        "fix İSTANBUL ΟΣ",
+        "bug parser",
+        "reparse",
+    ];
+    Arc::make_mut(&mut app.snapshot).commits = Arc::new(
+        (0..17_000)
+            .map(|index| Commit {
+                oid: format!("{index:040x}"),
+                subject: subjects[index % subjects.len()].into(),
+                author: "Example Author".into(),
+                ..Commit::default()
+            })
+            .collect(),
+    );
+    for text in [
+        "p",
+        "pa",
+        "par",
+        "parser",
+        "parse",
+        "parser !bug",
+        "parser !bugs",
+        "'parser",
+        "^parser",
+        "Pa",
+        "par",
+        "İ",
+        "ος",
+        "",
+    ] {
+        app.searches[3] = text.into();
+        let query = Query::new(text);
+        let mut expected: Vec<_> = app
+            .snapshot
+            .commits
+            .iter()
+            .enumerate()
+            .filter_map(|(index, commit)| {
+                query
+                    .score(&format!(
+                        "{} {} {} {} {}",
+                        commit.oid,
+                        commit.subject,
+                        commit.author,
+                        commit.committer,
+                        commit.decorations
+                    ))
+                    .map(|score| {
+                        (
+                            index,
+                            score
+                                + query
+                                    .score(&commit.subject)
+                                    .map_or(0, |subject| 128 + subject.max(0)),
+                        )
+                    })
+            })
+            .collect();
+        expected.sort_unstable_by(|left, right| {
+            right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0))
+        });
+        let expected: Vec<_> = expected.into_iter().map(|(index, _)| index).collect();
+        assert_eq!(
+            &*app.filtered_commits(),
+            expected.as_slice(),
+            "query: {text}"
+        );
+    }
+}
+
+#[test]
 fn fuzzy_queries_rank_boundaries_and_support_terms_exclusions_and_unicode() {
     assert!(
         fuzzy::score("src/cfg.rs", "cfg").unwrap()

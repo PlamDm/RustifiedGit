@@ -265,6 +265,157 @@ fn keyboard_help_includes_new_commands_remaps_disabled_and_other_context_custom_
 }
 
 #[test]
+fn file_selection_can_shrink_deselect_folder_children_and_select_filtered_files() {
+    let (_dir, mut app, _) = fixture();
+    let root = app.repo.root.clone();
+    fs::create_dir_all(root.join("picked")).unwrap();
+    for name in ["a.txt", "b.txt", "c.txt"] {
+        fs::write(root.join("picked").join(name), format!("{name} contents\n")).unwrap();
+    }
+    fs::write(root.join("outside.txt"), "outside\n").unwrap();
+    git(&root, &["add", "picked", "outside.txt"]);
+    git(&root, &["commit", "-qm", "Selection source"]);
+    let source = git(&root, &["rev-parse", "HEAD"]);
+    app.refresh();
+    wait(&mut app, |app| !app.loading);
+    let index = app
+        .filtered_commits()
+        .iter()
+        .position(|index| app.snapshot.commits[*index].oid == source)
+        .unwrap();
+    app.select_graph_row(app.commit_graph_row(index));
+    wait(&mut app, |app| !app.inspection_loading);
+    key(&mut app, KeyCode::Char('7'));
+    let row = |app: &App, path: &str| {
+        app.commit_rows
+            .iter()
+            .position(|row| row.path == Path::new(path))
+            .unwrap()
+    };
+    app.select_list_row(Panel::CommitFiles, row(&app, "picked"));
+    key(&mut app, KeyCode::Char('v'));
+    assert_eq!(app.file_selected_count(), 3);
+    app.select_list_row(Panel::CommitFiles, row(&app, "picked/a.txt"));
+    key(&mut app, KeyCode::Char('u'));
+    assert!(!app.file_is_marked(Path::new("picked/a.txt")));
+    assert!(app.file_is_marked(Path::new("picked/b.txt")));
+    assert_eq!(app.file_selected_count(), 2);
+    assert_eq!(
+        app.file_checkbox(&app.commit_rows[row(&app, "picked")]),
+        "[-] "
+    );
+    wait(&mut app, |app| !app.preview_loading);
+    assert!(!app.preview.text.contains("+a.txt contents"));
+    assert!(app.preview.text.contains("+b.txt contents"));
+    let text = screen(&mut app, 160, 45);
+    assert!(text.contains("2 selected"), "{text}");
+    assert!(text.contains("[-]"), "{text}");
+    key(&mut app, KeyCode::Char('U'));
+    assert_eq!(app.file_selected_count(), 0);
+    assert_eq!(app.focus, Panel::CommitFiles);
+
+    app.config.gui.show_file_tree = false;
+    app.rebuild();
+    app.select_list_row(Panel::CommitFiles, row(&app, "outside.txt"));
+    key(&mut app, KeyCode::Char('v'));
+    app.select_list_row(Panel::CommitFiles, row(&app, "picked/a.txt"));
+    for code in [KeyCode::Down, KeyCode::Down, KeyCode::Up] {
+        app.handle_key(KeyEvent::new(code, KeyModifiers::SHIFT));
+    }
+    assert_eq!(app.file_selected_count(), 3); // independent outside.txt plus a..b
+    assert!(!app.file_is_marked(Path::new("picked/c.txt")));
+    app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT));
+    assert_eq!(app.file_selected_count(), 2);
+    assert!(app.file_is_marked(Path::new("outside.txt")));
+    assert!(app.file_is_marked(Path::new("picked/a.txt")));
+    app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+    app.paste("picked".into());
+    key(&mut app, KeyCode::Enter);
+    app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+    assert_eq!(app.file_selected_count(), 3);
+    assert!(!app.file_is_marked(Path::new("outside.txt")));
+    key(&mut app, KeyCode::Esc);
+    assert_eq!(app.file_selected_count(), 0);
+    assert_eq!(app.focus, Panel::CommitFiles);
+}
+
+#[test]
+fn pane_one_lists_clean_and_uninitialized_submodules_and_opens_the_parent() {
+    let (dir, mut app, _) = fixture();
+    let root = app.repo.root.clone();
+    let module_source = dir.path().join("module-source");
+    fs::create_dir(&module_source).unwrap();
+    git(&module_source, &["init", "-q", "-b", "main"]);
+    for (name, value) in [
+        ("user.name", "Module Test"),
+        ("user.email", "module@example.invalid"),
+        ("commit.gpgsign", "false"),
+        ("core.hooksPath", ".test-hooks"),
+    ] {
+        git(&module_source, &["config", name, value]);
+    }
+    fs::write(module_source.join("file.txt"), "module\n").unwrap();
+    git(&module_source, &["add", "."]);
+    git(&module_source, &["commit", "-qm", "Module base"]);
+    for path in ["deps/clean", "deps/not-ready"] {
+        git(
+            &root,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                module_source.to_str().unwrap(),
+                path,
+            ],
+        );
+    }
+    git(&root, &["commit", "-qm", "Record submodules"]);
+    git(
+        &root,
+        &["submodule", "deinit", "-f", "--", "deps/not-ready"],
+    );
+    app.refresh();
+    wait(&mut app, |app| !app.loading);
+    assert_eq!(app.snapshot.submodules.len(), 2);
+    app.state.recent_repos.push(module_source);
+    app.select_list_row(Panel::Status, 1);
+    key(&mut app, KeyCode::Char(']'));
+    assert_eq!(app.repo_tab, 1);
+    assert_eq!(app.repository_count(), 2);
+    let rendered = screen(&mut app, 160, 48);
+    assert!(rendered.contains("[Submodules]"), "{rendered}");
+    assert!(rendered.contains("deps/clean"), "{rendered}");
+    assert!(rendered.contains("deps/not-ready"), "{rendered}");
+    app.select_list_row(Panel::Status, 1);
+    key(&mut app, KeyCode::Enter);
+    assert!(app.pending_repo.is_none());
+    assert!(app.busy.is_some());
+    wait(&mut app, |app| app.busy.is_none() && !app.loading);
+    assert!(app.selected_submodule().unwrap().initialized);
+    key(&mut app, KeyCode::Enter);
+    let module_path = app.pending_repo.take().unwrap();
+    assert_eq!(module_path, root.join("deps/not-ready"));
+    key(&mut app, KeyCode::Char('['));
+    assert_eq!(app.selected(Panel::Status), 1);
+    key(&mut app, KeyCode::Char(']'));
+    assert_eq!(app.selected(Panel::Status), 1);
+
+    let mut child = App::new(
+        Repository::discover(&module_path).unwrap(),
+        app.config.clone(),
+        app.state.clone(),
+    );
+    wait(&mut child, |app| !app.loading);
+    key(&mut child, KeyCode::Char('1'));
+    key(&mut child, KeyCode::Char(']'));
+    assert_eq!(child.repository_count(), 1);
+    assert!(screen(&mut child, 160, 48).contains("Parent repository"));
+    key(&mut child, KeyCode::Enter);
+    assert_eq!(child.pending_repo.unwrap(), root);
+}
+
+#[test]
 fn browsing_stashes_updates_file_pane_and_keeps_it_active_after_refresh() {
     let (_dir, mut app, _) = fixture();
     let root = app.repo.root.clone();
@@ -372,7 +523,7 @@ fn numbered_panes_and_tab_order_cover_the_layout() {
     }
     let text = screen(&mut app, 160, 48);
     for title in [
-        "1 Repositories",
+        "1 [Repositories]",
         "2 Local branches",
         "3 Remote branches",
         "4 Stashes",

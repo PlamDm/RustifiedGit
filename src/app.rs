@@ -125,6 +125,19 @@ struct CommitSearchCache {
     working_tree: usize,
 }
 
+struct FileRange {
+    panel: Panel,
+    anchor: PathBuf,
+    base: HashSet<PathBuf>,
+}
+
+#[derive(Default)]
+struct FileStats {
+    changed: usize,
+    staged: usize,
+    conflicted: usize,
+}
+
 pub struct App {
     pub repo: Repository,
     pub config: Config,
@@ -134,6 +147,7 @@ pub struct App {
     pub focus: Panel,
     pub side: Panel,
     pub rows: Vec<Row>,
+    file_stats: FileStats,
     pub commit_rows: Vec<Row>,
     pub commit_files: Vec<FileEntry>,
     pub commit_oid: String,
@@ -169,6 +183,9 @@ pub struct App {
     pub collapsed: HashSet<PathBuf>,
     pub marked: HashSet<PathBuf>,
     pub marked_commit_files: HashSet<PathBuf>,
+    file_range: Option<FileRange>,
+    pub repo_tab: usize,
+    repository_cursors: [(usize, usize); 2],
     pub copied_commits: Vec<String>,
     pub branch_tab: usize,
     pub commit_tab: usize,
@@ -271,6 +288,7 @@ impl App {
             focus: Panel::Commits,
             side: Panel::Files,
             rows: Vec::new(),
+            file_stats: FileStats::default(),
             commit_rows: Vec::new(),
             commit_files: Vec::new(),
             commit_oid: String::new(),
@@ -306,6 +324,9 @@ impl App {
             collapsed: HashSet::new(),
             marked: HashSet::new(),
             marked_commit_files: HashSet::new(),
+            file_range: None,
+            repo_tab: 0,
+            repository_cursors: [(0, 0); 2],
             copied_commits: Vec::new(),
             branch_tab: 0,
             commit_tab: 0,
@@ -370,6 +391,45 @@ impl App {
             Panel::CommitFiles
         }
     }
+    pub fn repository_count(&self) -> usize {
+        if self.repo_tab == 0 {
+            self.state.recent_repos.len()
+        } else {
+            self.snapshot.submodules.len() + usize::from(self.repo.superproject.is_some())
+        }
+    }
+    pub fn selected_submodule(&self) -> Option<&crate::model::Submodule> {
+        if self.repo_tab == 0 {
+            return None;
+        }
+        self.selected(Panel::Status)
+            .checked_sub(usize::from(self.repo.superproject.is_some()))
+            .and_then(|index| self.snapshot.submodules.get(index))
+    }
+    fn toggle_repository_tab(&mut self) {
+        self.repository_cursors[self.repo_tab] = (self.selections[0], self.scrolls[0]);
+        self.repo_tab = 1 - self.repo_tab;
+        let (selection, scroll) = self.repository_cursors[self.repo_tab];
+        self.selections[0] = selection.min(self.repository_count().saturating_sub(1));
+        self.scrolls[0] = scroll;
+    }
+    fn open_repository_entry(&mut self) {
+        if self.repo_tab == 0 {
+            self.pending_repo = self
+                .state
+                .recent_repos
+                .get(self.selected(Panel::Status))
+                .cloned();
+        } else if let Some(module) = self.selected_submodule().cloned() {
+            if module.initialized {
+                self.pending_repo = Some(self.repo.root.join(module.path));
+            } else {
+                self.run_operation(crate::git::update_submodules_operation(Some(&module.path)));
+            }
+        } else if self.selected(Panel::Status) == 0 {
+            self.pending_repo = self.repo.superproject.clone();
+        }
+    }
     pub fn details_panel(&self) -> Panel {
         if self.state.hide_command_log {
             Panel::Details
@@ -391,14 +451,14 @@ impl App {
         self.save_state();
     }
     fn file_marks(&self) -> &HashSet<PathBuf> {
-        if self.side == Panel::CommitFiles {
+        if self.file_panel() == Panel::CommitFiles {
             &self.marked_commit_files
         } else {
             &self.marked
         }
     }
     fn file_marks_mut(&mut self) -> &mut HashSet<PathBuf> {
-        if self.side == Panel::CommitFiles {
+        if self.file_panel() == Panel::CommitFiles {
             &mut self.marked_commit_files
         } else {
             &mut self.marked
@@ -413,9 +473,74 @@ impl App {
             Panel::CommitFiles => &self.marked_commit_files,
             _ => return false,
         };
-        marks.iter().any(|marked| path.starts_with(marked))
+        marks.contains(path) || marks.iter().any(|marked| marked.starts_with(path))
+    }
+    pub fn file_selection_enabled(&self) -> bool {
+        !self.stash_context && matches!(self.file_panel(), Panel::Files | Panel::CommitFiles)
+    }
+    pub fn file_selected_count(&self) -> usize {
+        if !self.file_selection_enabled() {
+            return 0;
+        }
+        self.file_marks().len()
+    }
+    pub fn changed_file_count(&self) -> usize {
+        self.file_stats.changed
+    }
+    pub fn staged_file_count(&self) -> usize {
+        self.file_stats.staged
+    }
+    pub fn has_conflicted_files(&self) -> bool {
+        self.file_stats.conflicted > 0
+    }
+    fn selection_entries(&self) -> &[FileEntry] {
+        if self.file_panel() == Panel::CommitFiles {
+            &self.commit_files
+        } else {
+            &self.snapshot.files
+        }
+    }
+    fn selectable_files(&self) -> impl Iterator<Item = &FileEntry> {
+        let working = self.file_panel() == Panel::Files;
+        let show_unchanged = !working || self.config.gui.show_unchanged_files;
+        let changed_only = working && self.changed_only;
+        let query = crate::fuzzy::Query::new(self.search(self.file_panel()));
+        self.selection_entries()
+            .iter()
+            .filter(move |file| tree::file_visible(file, show_unchanged, changed_only, &query))
+    }
+    fn selectable_paths(&self, path: &Path) -> Vec<PathBuf> {
+        self.selectable_files()
+            .filter(|file| file.path.starts_with(path))
+            .map(|file| file.path.clone())
+            .collect()
+    }
+    pub fn file_checkbox(&self, row: &Row) -> &'static str {
+        if !self.file_selection_enabled() {
+            return "";
+        }
+        if !row.directory {
+            return if self.file_marks().contains(&row.path) {
+                "[x] "
+            } else {
+                "[ ] "
+            };
+        }
+        if !self.file_is_marked(&row.path) {
+            return "[ ] ";
+        }
+        if self
+            .selectable_files()
+            .filter(|file| file.path.starts_with(&row.path))
+            .all(|file| self.file_marks().contains(&file.path))
+        {
+            "[x] "
+        } else {
+            "[-] "
+        }
     }
     fn clear_file_marks(&mut self) -> bool {
+        self.file_range = None;
         if self.side == Panel::HeadFiles || self.file_marks().is_empty() {
             return false;
         }
@@ -424,16 +549,66 @@ impl App {
         self.request_preview(self.focus == Panel::Diff);
         true
     }
-    fn mark_current_file(&mut self, toggle: bool) {
-        if self.stash_context {
+    fn toggle_file_selection(&mut self) {
+        self.file_range = None;
+        if !self.file_selection_enabled() {
             return;
         }
         if let Some(path) = self.row().map(|row| row.path.clone()) {
+            let paths = self.selectable_paths(&path);
+            let remove =
+                !paths.is_empty() && paths.iter().all(|path| self.file_marks().contains(path));
             let marks = self.file_marks_mut();
-            if !toggle || !marks.remove(&path) {
-                marks.insert(path);
+            for path in paths {
+                if remove {
+                    marks.remove(&path);
+                } else {
+                    marks.insert(path);
+                }
             }
         }
+    }
+    fn deselect_current_file(&mut self) {
+        self.file_range = None;
+        if let Some(path) = self.row().map(|row| row.path.clone()) {
+            self.file_marks_mut()
+                .retain(|marked| !marked.starts_with(&path));
+        }
+    }
+    fn extend_file_selection(&mut self, delta: isize) {
+        if !self.file_selection_enabled() {
+            self.move_selection(delta);
+            return;
+        }
+        let Some(anchor) = self.row().map(|row| row.path.clone()) else {
+            return;
+        };
+        let range = self
+            .file_range
+            .take()
+            .filter(|range| range.panel == self.focus)
+            .unwrap_or_else(|| FileRange {
+                panel: self.focus,
+                anchor,
+                base: self.file_marks().clone(),
+            });
+        self.move_selection(delta);
+        let rows = self.file_rows(self.focus);
+        let Some(anchor) = rows.iter().position(|row| row.path == range.anchor) else {
+            return;
+        };
+        let cursor = self.selected(self.focus);
+        let mut marks = range.base.clone();
+        let range_rows = &rows[anchor.min(cursor)..=anchor.max(cursor)];
+        marks.extend(
+            self.selectable_paths(Path::new(""))
+                .into_iter()
+                .filter(|path| range_rows.iter().any(|row| path.starts_with(&row.path))),
+        );
+        *self.file_marks_mut() = marks;
+        self.file_range = Some(range);
+        self.preview_key = None;
+        self.request_preview(false);
     }
     fn set_all_directories(&mut self, collapse: Option<bool>) {
         let files = match self.file_panel() {
@@ -870,16 +1045,8 @@ impl App {
                 format!("Branch: {}", self.snapshot.branch),
                 format!(
                     "{} changed files · {} staged",
-                    self.snapshot
-                        .files
-                        .iter()
-                        .filter(|file| file.changed())
-                        .count(),
-                    self.snapshot
-                        .files
-                        .iter()
-                        .filter(|file| file.staged())
-                        .count()
+                    self.changed_file_count(),
+                    self.staged_file_count()
                 ),
                 String::new(),
                 "c commit · C editor · A amend".into(),
@@ -1046,6 +1213,7 @@ impl App {
         }
     }
     pub fn select_graph_row(&mut self, logical_index: usize) {
+        self.file_range = None;
         self.clear_stash_inspection();
         self.close_comparison();
         self.focus = Panel::Commits;
@@ -1067,6 +1235,7 @@ impl App {
         }
     }
     pub fn select_list_row(&mut self, panel: Panel, index: usize) {
+        self.file_range = None;
         if panel == Panel::Commits {
             self.select_graph_row(index);
             return;
@@ -1233,36 +1402,21 @@ impl App {
             if query.is_empty() {
                 cache.matches = CommitOrder::new((0..self.snapshot.commits.len()).collect());
             } else {
-                let compiled = crate::fuzzy::Query::new(query);
-                let mut matches: Vec<_> = self
-                    .snapshot
-                    .commits
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(index, commit)| {
-                        compiled
-                            .score(&format!(
-                                "{} {} {} {} {}",
-                                commit.oid,
-                                commit.subject,
-                                commit.author,
-                                commit.committer,
-                                commit.decorations
-                            ))
-                            .map(|score| {
-                                (
-                                    index,
-                                    score
-                                        + compiled
-                                            .score(&commit.subject)
-                                            .map_or(0, |subject| 128 + subject.max(0)),
-                                )
-                            })
-                    })
-                    .collect();
-                matches.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+                // Extending plain search terms can only narrow their previous matches.
+                // Operators and deletions need a full scan because they can widen results.
+                let can_narrow = Arc::ptr_eq(&cache.commits, &self.snapshot.commits)
+                    && (cache.query.is_empty()
+                        || (query.starts_with(&cache.query)
+                            && query.bytes().all(|byte| {
+                                byte.is_ascii_alphanumeric() || byte.is_ascii_whitespace()
+                            })));
+                let candidates = if can_narrow {
+                    cache.matches.clone()
+                } else {
+                    CommitOrder::new((0..self.snapshot.commits.len()).collect())
+                };
                 cache.matches =
-                    CommitOrder::new(matches.into_iter().map(|(index, _)| index).collect());
+                    crate::history::search_commits(&self.snapshot.commits, query, candidates);
             }
             cache.commits = self.snapshot.commits.clone();
             cache.query = query.to_owned();
@@ -1322,11 +1476,31 @@ impl App {
             Panel::Stash => self.filtered_stashes().len(),
             Panel::Output => self.output.len(),
             Panel::Diff => self.preview_lines.len(),
-            Panel::Status => self.state.recent_repos.len(),
+            Panel::Status => self.repository_count(),
             Panel::Details => self.details_lines.len(),
         }
     }
     pub fn rebuild(&mut self) {
+        self.file_range = None;
+        self.file_stats =
+            self.snapshot
+                .files
+                .iter()
+                .fold(FileStats::default(), |mut stats, file| {
+                    stats.changed += usize::from(file.changed());
+                    stats.staged += usize::from(file.staged());
+                    stats.conflicted += usize::from(file.conflicted());
+                    stats
+                });
+        if !self.marked.is_empty() {
+            let existing: HashSet<_> = self
+                .snapshot
+                .files
+                .iter()
+                .map(|file| file.path.as_path())
+                .collect();
+            self.marked.retain(|path| existing.contains(path.as_path()));
+        }
         self.rebuild_branch_rows();
         let selected = self
             .rows
@@ -1740,7 +1914,9 @@ impl App {
                             self.commit_files = inspection.files;
                             self.commit_details = Some(inspection.details);
                             self.commit_oid = oid;
-                            self.selections[7] = 0;
+                            if !self.stash_context {
+                                self.selections[7] = 0;
+                            }
                             self.rebuild_commit_rows();
                             self.update_details();
                             self.preview_key = None;
@@ -1908,6 +2084,9 @@ impl App {
         }
     }
     pub fn set_focus(&mut self, panel: Panel) {
+        if panel != self.focus {
+            self.file_range = None;
+        }
         if matches!(
             panel,
             Panel::Status
@@ -1961,6 +2140,7 @@ impl App {
         self.dirty = true;
     }
     fn move_selection(&mut self, delta: isize) {
+        self.file_range = None;
         if self.focus == Panel::Commits {
             let old = self.selected_graph_row();
             let next = old
@@ -2030,6 +2210,7 @@ impl App {
     }
 
     fn apply_live_search(&mut self, query: String) {
+        self.file_range = None;
         let index = panel_index(self.focus);
         if self.searches[index] == query {
             return;
@@ -2220,7 +2401,7 @@ impl App {
         if !marks.is_empty() {
             return files
                 .iter()
-                .filter(|file| marks.iter().any(|path| file.path.starts_with(path)))
+                .filter(|file| marks.contains(&file.path))
                 .collect();
         }
         self.row()
@@ -2946,7 +3127,26 @@ impl App {
             }
         }
         if matches!(self.focus, Panel::Files | Panel::CommitFiles) && key_matches("v", key) {
-            self.mark_current_file(true);
+            self.toggle_file_selection();
+            self.preview_key = None;
+            self.request_preview(false);
+            return Ok(());
+        }
+        if matches!(self.focus, Panel::Files | Panel::CommitFiles)
+            && self.file_selection_enabled()
+            && (self.is("files", "deselectFile", &["u"], key)
+                || self.is("files", "clearSelection", &["U"], key)
+                || self.is("files", "selectAll", &["<ctrl+a>"], key))
+        {
+            if self.is("files", "deselectFile", &["u"], key) {
+                self.deselect_current_file();
+            } else if self.is("files", "clearSelection", &["U"], key) {
+                self.clear_file_marks();
+            } else {
+                let paths = self.selectable_paths(Path::new(""));
+                self.file_range = None;
+                *self.file_marks_mut() = paths.into_iter().collect();
+            }
             self.preview_key = None;
             self.request_preview(false);
             return Ok(());
@@ -2965,11 +3165,7 @@ impl App {
         }
         if key_matches("<shift+down>", key) || key_matches("<shift+up>", key) {
             if matches!(self.focus, Panel::Files | Panel::CommitFiles) {
-                self.mark_current_file(false);
-                self.move_selection(if key.code == KeyCode::Down { 1 } else { -1 });
-                self.mark_current_file(false);
-                self.preview_key = None;
-                self.request_preview(false);
+                self.extend_file_selection(if key.code == KeyCode::Down { 1 } else { -1 });
             } else if self.focus == Panel::Commits {
                 self.move_selection(if key.code == KeyCode::Down {
                     self.page_step() as isize
@@ -3055,6 +3251,7 @@ impl App {
         {
             let previous = key.code == KeyCode::Char('[');
             match self.focus {
+                Panel::Status => self.toggle_repository_tab(),
                 Panel::Branches => {
                     self.branch_tab = match (self.branch_tab, previous) {
                         (0, false) | (3, true) => 2,
@@ -3168,9 +3365,24 @@ impl App {
             }
             Panel::Commits => self.commits_key(key)?,
             Panel::Stash => self.stash_key(key)?,
-            Panel::Status if key.code == KeyCode::Enter => {
-                if let Some(path) = self.state.recent_repos.get(self.selected(Panel::Status)) {
-                    self.pending_repo = Some(path.clone());
+            Panel::Status if key.code == KeyCode::Enter => self.open_repository_entry(),
+            Panel::Status if self.repo_tab == 1 && key_matches("i", key) => {
+                if let Some(module) = self.selected_submodule() {
+                    self.run_operation(crate::git::update_submodules_operation(Some(&module.path)));
+                }
+            }
+            Panel::Status if self.repo_tab == 1 && key_matches("a", key) => {
+                self.run_operation(crate::git::update_submodules_operation(None));
+            }
+            Panel::Status if self.repo_tab == 1 && key_matches("y", key) => {
+                if let Some(module) = self.selected_submodule() {
+                    self.copy(
+                        self.repo
+                            .root
+                            .join(&module.path)
+                            .to_string_lossy()
+                            .into_owned(),
+                    );
                 }
             }
             Panel::Status if key.code == KeyCode::Char('r') => self.repository_menu(),
@@ -3996,49 +4208,33 @@ impl App {
                 label: "Push options…".into(),
                 action: MenuAction::PushMenu(None),
             },
-            run_item(
-                "Initialize/update all submodules",
-                ["submodule", "update", "--init", "--recursive", "--progress"],
-                false,
-            ),
+            MenuItem {
+                label: "Initialize/update all submodules".into(),
+                action: MenuAction::Run(crate::git::update_submodules_operation(None), false),
+            },
             MenuItem {
                 label: "Run interactive Git/shell command".into(),
                 action: MenuAction::Input(Prompt::Shell(true)),
             },
         ];
-        for file in &self.snapshot.files {
-            if self.repo.root.join(&file.path).join(".git").exists() {
+        for module in &self.snapshot.submodules {
+            if module.initialized {
                 items.push(MenuItem {
-                    label: format!("Open submodule {}", file.path.display()),
-                    action: MenuAction::SwitchRepo(self.repo.root.join(&file.path)),
+                    label: format!("Open submodule {}", module.path.display()),
+                    action: MenuAction::SwitchRepo(self.repo.root.join(&module.path)),
                 });
-                let mut command = CommandSpec::git([
-                    OsString::from("submodule"),
-                    "update".into(),
-                    "--init".into(),
-                    "--recursive".into(),
-                    "--progress".into(),
-                    "--".into(),
-                    file.path.as_os_str().to_owned(),
-                ]);
-                command.label = format!("Initialize/update submodule {}", file.path.display());
-                items.push(MenuItem {
-                    label: command.label.clone(),
-                    action: MenuAction::Run(
-                        Operation {
-                            label: command.label.clone(),
-                            steps: vec![Step::Command(command)],
-                        },
-                        false,
-                    ),
-                });
-                if let Ok(operation) = crate::git::reset_submodule_operation(&file.path) {
+                if let Ok(operation) = crate::git::reset_submodule_operation(&module.path) {
                     items.push(MenuItem {
-                        label: format!("Stash and reset submodule {}", file.path.display()),
+                        label: format!("Stash and reset submodule {}", module.path.display()),
                         action: MenuAction::Run(operation, true),
                     });
                 }
             }
+            let operation = crate::git::update_submodules_operation(Some(&module.path));
+            items.push(MenuItem {
+                label: operation.label.clone(),
+                action: MenuAction::Run(operation, false),
+            });
         }
         self.menu("Repository", items);
     }
@@ -4094,7 +4290,7 @@ impl App {
         ];
         if !merge && self.side == Panel::CommitFiles {
             if let Some(oid) = &self.stash_inspection_oid {
-                args.extend([format!("{}^", oid).into(), oid.clone().into()]);
+                args.extend([format!("{oid}^").into(), oid.clone().into()]);
             } else if let Some(info) = &self.comparison {
                 args.extend([info.diff_base().into(), info.to_oid.clone().into()]);
             } else {

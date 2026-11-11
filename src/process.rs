@@ -7,7 +7,7 @@ use std::{
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
-        mpsc::SyncSender,
+        mpsc::{self, SyncSender},
     },
     thread,
     time::{Duration, Instant},
@@ -218,9 +218,18 @@ pub fn run(
     let stdout_overflow = overflow.clone();
     let stderr_overflow = overflow.clone();
     let stderr_stream = stream.clone();
-    let stdout_reader = thread::spawn(move || read_pipe(stdout, limit, stdout_overflow, stream));
-    let stderr_reader =
-        thread::spawn(move || read_pipe(stderr, limit, stderr_overflow, stderr_stream));
+    let (finished, pipe_finished) = mpsc::channel();
+    let stdout_finished = finished.clone();
+    let stdout_reader = thread::spawn(move || {
+        let result = read_pipe(stdout, limit, stdout_overflow, stream);
+        let _ = stdout_finished.send(());
+        result
+    });
+    let stderr_reader = thread::spawn(move || {
+        let result = read_pipe(stderr, limit, stderr_overflow, stderr_stream);
+        let _ = finished.send(());
+        result
+    });
     let writer = spec.stdin.as_ref().map(|data| {
         let data = data.clone();
         let mut input = child.stdin.take().expect("piped stdin");
@@ -229,6 +238,7 @@ pub fn run(
     let started = Instant::now();
     let mut timed_out = false;
     let mut exited = None;
+    let mut finished_pipes = 0;
     let status = loop {
         if cancel.is_cancelled() || overflow.load(Ordering::Acquire) || started.elapsed() > timeout
         {
@@ -240,11 +250,17 @@ pub fn run(
             exited = child.try_wait()?;
         }
         if let Some(status) = exited {
-            if stdout_reader.is_finished() && stderr_reader.is_finished() {
+            if finished_pipes == 2 || (stdout_reader.is_finished() && stderr_reader.is_finished()) {
                 break status;
             }
         }
-        thread::sleep(Duration::from_millis(4));
+        // Pipe completion wakes short Git reads immediately. The timeout keeps
+        // cancellation responsive even when a child is quiet or has closed its pipes.
+        match pipe_finished.recv_timeout(Duration::from_millis(4)) {
+            Ok(()) => finished_pipes += 1,
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => thread::sleep(Duration::from_millis(4)),
+        }
     };
     let stdout = stdout_reader
         .join()

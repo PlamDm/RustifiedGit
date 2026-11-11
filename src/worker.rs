@@ -128,13 +128,18 @@ impl Workers {
         let refresh_repo = repo.clone();
         let refresh_events = events.clone();
         let refresh = Latest::spawn(move |id, options, cancel: Cancellation| {
-            if let Ok((references, head)) = refresh_repo.ref_state(&cancel) {
+            let ref_state = refresh_repo.ref_state(&cancel).ok();
+            if let Some((references, head)) = &ref_state {
                 if !cancel.is_cancelled() {
-                    let _ = refresh_events.send(WorkerEvent::References(id, references, head));
+                    let _ = refresh_events.send(WorkerEvent::References(
+                        id,
+                        references.clone(),
+                        head.clone(),
+                    ));
                 }
             }
             let result = refresh_repo
-                .status_snapshot(&options, &cancel)
+                .status_snapshot_with_refs(&options, &cancel, ref_state)
                 .map_err(|error| format!("{error:#}"));
             if !cancel.is_cancelled() {
                 let _ = refresh_events.send(WorkerEvent::Snapshot(id, result));

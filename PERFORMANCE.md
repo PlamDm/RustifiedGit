@@ -1,5 +1,43 @@
 # Recorded performance
 
+## November 12 optimization pass
+
+Measured on macOS arm64 with Rust 1.88.0. The synthetic workload contains
+100,000 files, 100,000 commits and 5,000 references at a 160×42 terminal size.
+Its baseline includes the new selection and submodule features before the
+performance changes. Raw samples are in
+[performance-2026-11-12.json](benchmarks/performance-2026-11-12.json).
+
+| Workload | Before | After |
+| --- | ---: | ---: |
+| Build the file tree, median of three runs | 74.18 ms | 41.51 ms |
+| Rebuild application lists | 80.95 ms | 43.41 ms |
+| Render 100 viewport frames | 36.90 ms | 23.81 ms |
+| Rank a search matching 100,000 commits | 181.76 ms | 20.03 ms |
+
+On the LLVM clone with 190,280 tracked files, five alternating real-terminal
+launches per binary reached the first commit in 229.77 ms median with the
+v0.1.0 executable and 219.49 ms with the optimized executable. Five backend
+snapshots per binary measured 567.75 ms and 533.89 ms median, respectively.
+The small startup difference is sensitive to machine activity and cache state.
+Git's working-tree scan still accounts for most of the large-repository
+snapshot time.
+
+The changes reuse the early reference query, wake completed Git reads promptly,
+overlay status changes onto the sorted tracked-file list, build trees with
+native path keys, and reuse file counts during rendering. Commit searches reuse
+scoring buffers and score large candidate sets on up to eight threads. Extending
+plain search terms narrows existing results. Deletions and query operators
+trigger a full scan to preserve matching and ranking.
+
+Run the synthetic workload with:
+
+```sh
+cargo bench --bench performance --locked
+```
+
+## Earlier measurements
+
 Measured locally on macOS arm64 on November 9, 2026, with Rust 1.88.0,
 Go 1.27.3 and Git 2.56.0. Raw samples are in
 [benchmarks/macos-arm64.json](benchmarks/macos-arm64.json).

@@ -1134,6 +1134,170 @@ fn error_messages_preserve_git_failures() {
 }
 
 #[test]
+fn submodule_inventory_includes_clean_and_uninitialized_modules_and_updates_literal_paths() {
+    use rustifiedgit::git::{Step, update_submodules_operation};
+    let fixture = Fixture::new();
+    fixture.write("root-file", "root\n");
+    fixture.commit("root");
+    let source = Fixture::new();
+    source.write("module.txt", "base\n");
+    source.commit("module base");
+    for (name, path) in [
+        ("module.with.dots", "modules/my [one]"),
+        ("other", "modules/my o"),
+    ] {
+        git(
+            fixture.dir.path(),
+            [
+                OsStr::new("-c"),
+                OsStr::new("protocol.file.allow=always"),
+                OsStr::new("submodule"),
+                OsStr::new("add"),
+                OsStr::new("--name"),
+                OsStr::new(name),
+                source.dir.path().as_os_str(),
+                OsStr::new(path),
+            ],
+        );
+    }
+    fixture.commit("record modules");
+    let modules = fixture.snapshot().submodules;
+    assert_eq!(modules.len(), 2);
+    assert!(
+        modules
+            .iter()
+            .all(|module| module.initialized && !module.changed)
+    );
+    assert!(
+        modules
+            .iter()
+            .any(|module| module.name == "module.with.dots"
+                && module.path == Path::new("modules/my [one]"))
+    );
+    git(
+        fixture.dir.path(),
+        [
+            "--literal-pathspecs",
+            "submodule",
+            "deinit",
+            "-f",
+            "--",
+            "modules/my [one]",
+            "modules/my o",
+        ],
+    );
+    assert!(
+        fixture
+            .snapshot()
+            .submodules
+            .iter()
+            .all(|module| !module.initialized)
+    );
+    let mut operation = update_submodules_operation(Some(Path::new("modules/my [one]")));
+    if let Step::Command(command) = &mut operation.steps[0] {
+        command
+            .env
+            .push(("GIT_ALLOW_PROTOCOL".into(), "file".into()));
+    }
+    fixture.execute(operation);
+    let modules = fixture.snapshot().submodules;
+    let selected = modules
+        .iter()
+        .find(|module| module.name == "module.with.dots")
+        .unwrap();
+    assert!(selected.initialized);
+    assert!(
+        !modules
+            .iter()
+            .find(|module| module.name == "other")
+            .unwrap()
+            .initialized
+    );
+    fixture.write("modules/my [one]/module.txt", "changed\n");
+    assert!(
+        fixture
+            .snapshot()
+            .submodules
+            .iter()
+            .find(|module| module.name == "module.with.dots")
+            .unwrap()
+            .changed
+    );
+    let child = Repository::discover(&fixture.repo.root.join("modules/my [one]")).unwrap();
+    assert_eq!(child.superproject.as_ref(), Some(&fixture.repo.root));
+    git(
+        fixture.dir.path(),
+        [
+            "config",
+            "--file",
+            ".gitmodules",
+            "submodule.unsafe.path",
+            "../outside",
+        ],
+    );
+    assert_eq!(
+        fixture
+            .repo
+            .submodules(&Cancellation::default())
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+#[test]
+fn recursive_submodule_initialization_exposes_nested_repositories() {
+    use rustifiedgit::git::{Step, update_submodules_operation};
+    let nested = Fixture::new();
+    nested.write("nested.txt", "nested\n");
+    nested.commit("nested base");
+    let source = Fixture::new();
+    source.write("source.txt", "source\n");
+    source.commit("source base");
+    git(
+        source.dir.path(),
+        [
+            OsStr::new("-c"),
+            OsStr::new("protocol.file.allow=always"),
+            OsStr::new("submodule"),
+            OsStr::new("add"),
+            nested.dir.path().as_os_str(),
+            OsStr::new("nested module"),
+        ],
+    );
+    source.commit("nested module");
+    let fixture = Fixture::new();
+    fixture.write("root.txt", "root\n");
+    fixture.commit("root base");
+    git(
+        fixture.dir.path(),
+        [
+            OsStr::new("-c"),
+            OsStr::new("protocol.file.allow=always"),
+            OsStr::new("submodule"),
+            OsStr::new("add"),
+            source.dir.path().as_os_str(),
+            OsStr::new("module"),
+        ],
+    );
+    fixture.commit("record module");
+    let child = Repository::discover(&fixture.repo.root.join("module")).unwrap();
+    assert!(!child.submodules(&Cancellation::default()).unwrap()[0].initialized);
+    let mut operation = update_submodules_operation(None);
+    if let Step::Command(command) = &mut operation.steps[0] {
+        command
+            .env
+            .push(("GIT_ALLOW_PROTOCOL".into(), "file".into()));
+    }
+    fixture.execute(operation);
+    let modules = child.submodules(&Cancellation::default()).unwrap();
+    assert_eq!(modules.len(), 1);
+    assert!(modules[0].initialized);
+    let grandchild = Repository::discover(&child.root.join(&modules[0].path)).unwrap();
+    assert_eq!(grandchild.superproject, Some(child.root));
+}
+
+#[test]
 fn workspace_nuke_stashes_submodules_and_resets_their_recorded_commit() {
     let source = Fixture::new();
     source.write("module-file", "recorded\n");

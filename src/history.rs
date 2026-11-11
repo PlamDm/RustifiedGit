@@ -4,6 +4,76 @@
 use crate::model::Commit;
 use std::{ops::Deref, sync::Arc};
 
+fn score_commits(
+    commits: &[Commit],
+    query: &crate::fuzzy::Query,
+    indices: &[usize],
+) -> Vec<(usize, i64)> {
+    let mut scratch = crate::fuzzy::ScoreScratch::default();
+    let mut candidate = String::new();
+    indices
+        .iter()
+        .copied()
+        .filter_map(|index| {
+            let commit = &commits[index];
+            candidate.clear();
+            for (position, field) in [
+                &commit.oid,
+                &commit.subject,
+                &commit.author,
+                &commit.committer,
+                &commit.decorations,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                if position > 0 {
+                    candidate.push(' ');
+                }
+                candidate.push_str(field);
+            }
+            query
+                .score_with_scratch(&candidate, &mut scratch)
+                .map(|score| {
+                    (
+                        index,
+                        score
+                            + query
+                                .score_with_scratch(&commit.subject, &mut scratch)
+                                .map_or(0, |subject| 128 + subject.max(0)),
+                    )
+                })
+        })
+        .collect()
+}
+
+pub fn search_commits(commits: &[Commit], text: &str, candidates: CommitOrder) -> CommitOrder {
+    let query = crate::fuzzy::Query::new(text);
+    let workers = if candidates.len() < 16_384 {
+        1
+    } else {
+        std::thread::available_parallelism().map_or(1, |count| count.get().min(8))
+    };
+    let mut matches = if workers == 1 {
+        score_commits(commits, &query, &candidates)
+    } else {
+        std::thread::scope(|scope| {
+            let jobs: Vec<_> = candidates
+                .chunks(candidates.len().div_ceil(workers))
+                .map(|chunk| {
+                    let query = &query;
+                    scope.spawn(move || score_commits(commits, query, chunk))
+                })
+                .collect();
+            jobs.into_iter()
+                .flat_map(|job| job.join().expect("commit search worker panicked"))
+                .collect()
+        })
+    };
+    matches.sort_unstable_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+    CommitOrder::new(matches.into_iter().map(|(index, _)| index).collect())
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct CommitOrder(Arc<Vec<usize>>);
 

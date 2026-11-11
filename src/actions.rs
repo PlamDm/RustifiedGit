@@ -1,7 +1,7 @@
 use crate::{
     app::App,
     config::{key_event, key_matches},
-    model::{FileEntry, Panel, RefKind},
+    model::{Panel, RefKind},
 };
 use crossterm::event::KeyEvent;
 use serde_yaml::Value;
@@ -165,7 +165,7 @@ impl Catalog<'_> {
                     "Confirm discarding changes in the selected file or directory.",
                 );
             }
-            if writable && app.snapshot.files.iter().any(FileEntry::changed) {
+            if writable && app.changed_file_count() > 0 {
                 self.add(
                     "files",
                     "toggleStagedAll",
@@ -188,7 +188,7 @@ impl Catalog<'_> {
                     "Choose tracked-only, staged-only or keep-index stashing.",
                 );
             }
-            if writable && app.snapshot.files.iter().any(FileEntry::staged) {
+            if writable && app.staged_file_count() > 0 {
                 self.add(
                     "files",
                     "commitChanges",
@@ -364,7 +364,7 @@ impl Catalog<'_> {
                 "External diff tool",
                 "Inspect the selection with Git's configured diff tool.",
             );
-            if working && app.snapshot.files.iter().any(FileEntry::conflicted) {
+            if working && app.has_conflicted_files() {
                 self.add(
                     "files",
                     "openMergeToolForFile",
@@ -493,7 +493,7 @@ pub fn for_app(app: &App) -> Vec<Action> {
                         "Bisect options…",
                         "Start, mark, skip or finish a Git bisect.",
                     );
-                    if app.snapshot.files.iter().any(FileEntry::staged) {
+                    if app.staged_file_count() > 0 {
                         catalog.add(
                             "commits",
                             "createFixupCommit",
@@ -855,11 +855,46 @@ pub fn for_app(app: &App) -> Vec<Action> {
             }
         }
         Panel::Status => {
-            catalog.key(
-                "<enter>",
-                "Open repository",
-                "Switch to the selected recent repository.",
-            );
+            if app.repo_tab == 0 {
+                catalog.key(
+                    "<enter>",
+                    "Open repository",
+                    "Switch to the selected recent repository.",
+                );
+            } else {
+                if let Some(module) = app.selected_submodule() {
+                    if module.initialized {
+                        catalog.key(
+                            "<enter>",
+                            "Open submodule",
+                            "Open this submodule's graph, branches and working files.",
+                        );
+                    } else if writable {
+                        catalog.key("<enter>", "Initialize submodule…", "Initialize this submodule and its nested submodules, then press Enter to open it.");
+                    }
+                    if writable {
+                        catalog.key("i", "Initialize/update submodule…", "Update the selected submodule and nested submodules to their recorded commits.");
+                    }
+                    catalog.key(
+                        "y",
+                        "Copy submodule path",
+                        "Copy the full local path to this submodule.",
+                    );
+                } else if app.repo.superproject.is_some() {
+                    catalog.key(
+                        "<enter>",
+                        "Open parent repository",
+                        "Return to the repository containing this submodule.",
+                    );
+                }
+                if writable && !app.snapshot.submodules.is_empty() {
+                    catalog.key(
+                        "a",
+                        "Initialize/update all submodules…",
+                        "Initialize or update every submodule recursively to its recorded commit.",
+                    );
+                }
+            }
             catalog.key(
                 "r",
                 "Repository actions…",
@@ -966,6 +1001,7 @@ pub fn for_app(app: &App) -> Vec<Action> {
     if matches!(
         app.focus,
         Panel::Branches
+            | Panel::Status
             | Panel::Commits
             | Panel::Diff
             | Panel::Files
@@ -980,7 +1016,7 @@ pub fn for_app(app: &App) -> Vec<Action> {
             "nextTab",
             "]",
             "Next tab / diff side",
-            "Switch Details / Output, Changes / HEAD tree, branch/history tabs, or staged / unstaged diffs.",
+            "Switch Repositories / Submodules, Details / Output, Changes / HEAD tree, branch/history tabs, or staged / unstaged diffs.",
         );
         catalog.add(
             "universal",
@@ -1035,16 +1071,25 @@ pub fn for_app(app: &App) -> Vec<Action> {
             "Toggle all directories in this file tree, including nested folders.",
         );
     }
-    if matches!(app.focus, Panel::Files | Panel::CommitFiles) {
+    if matches!(app.focus, Panel::Files | Panel::CommitFiles) && app.file_selection_enabled() {
+        catalog.add(
+            "files",
+            "deselectFile",
+            "u",
+            "Deselect file / folder",
+            "Remove the hovered file or all files in this folder from the selection.",
+        );
+        catalog.add("files", "clearSelection", "U", "Deselect all", "Clear every selected file while keeping focus in this pane. Esc also clears the selection.");
+        catalog.add("files", "selectAll", "<ctrl+a>", "Select all matching files", "Select every file matching the active filter, including files inside collapsed folders.");
         catalog.key(
             "<shift+down>",
             "Extend selection down",
-            "Mark this path and the next file or folder.",
+            "Extend the selection from its anchor. Reverse direction to shrink the range.",
         );
         catalog.key(
             "<shift+up>",
             "Extend selection up",
-            "Mark this path and the previous file or folder.",
+            "Extend the selection upward from its anchor. Reverse direction to shrink the range.",
         );
         catalog.key(
             "<esc>",

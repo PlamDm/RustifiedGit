@@ -60,9 +60,16 @@ pub fn rows(
         searching: bool,
         rows: &mut Vec<BranchRow>,
     ) {
-        let mut children: Vec<_> = node.children.iter().collect();
-        children.sort_by_key(|(name, child)| (child.children.is_empty(), *name));
-        for (name, child) in children {
+        for (name, child) in node
+            .children
+            .iter()
+            .filter(|(_, child)| !child.children.is_empty())
+            .chain(
+                node.children
+                    .iter()
+                    .filter(|(_, child)| child.children.is_empty()),
+            )
+        {
             let path = if depth == 0 {
                 name.clone()
             } else {

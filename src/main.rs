@@ -227,7 +227,9 @@ fn run(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
                         app.state.save(&app.config.directory)?;
                         let state = app.state.clone();
                         let config = app.config.clone();
+                        let repo_tab = app.repo_tab;
                         *app = App::new(repo, config, state);
+                        app.repo_tab = repo_tab;
                     }
                     Err(error) => app.error(format!("{error:#}")),
                 }

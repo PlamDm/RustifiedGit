@@ -207,33 +207,91 @@ fn draw_repositories(frame: &mut Frame, area: Rect, app: &mut App) {
     let range = viewport(
         app,
         Panel::Status,
-        app.state.recent_repos.len(),
+        app.repository_count(),
         selected,
         area.height.saturating_sub(2) as usize,
     );
-    let items = app.state.recent_repos[range.clone()]
-        .iter()
-        .map(|path| {
-            let active = path == &app.repo.root;
-            Line::from(vec![
-                Span::styled(
-                    if active { "● " } else { "  " },
-                    Style::default().fg(if active { ACCENT } else { MUTED }),
-                ),
-                Span::raw(clean(
-                    &path.file_name().unwrap_or_default().to_string_lossy(),
-                )),
-            ])
-        })
-        .collect();
+    let items = if app.repo_tab == 0 {
+        app.state.recent_repos[range.clone()]
+            .iter()
+            .map(|path| {
+                let active = path == &app.repo.root;
+                Line::from(vec![
+                    Span::styled(
+                        if active { "● " } else { "  " },
+                        Style::default().fg(if active { ACCENT } else { MUTED }),
+                    ),
+                    Span::raw(clean(
+                        &path.file_name().unwrap_or_default().to_string_lossy(),
+                    )),
+                ])
+            })
+            .collect()
+    } else {
+        let parent = usize::from(app.repo.superproject.is_some());
+        range
+            .clone()
+            .map(|index| {
+                if index < parent {
+                    return Line::from(vec![
+                        Span::styled("↑ ", Style::default().fg(ACCENT)),
+                        Span::raw("Parent repository"),
+                    ]);
+                }
+                let module = &app.snapshot.submodules[index - parent];
+                Line::from(vec![
+                    Span::styled(
+                        if module.initialized { "● " } else { "○ " },
+                        Style::default().fg(if !module.initialized {
+                            MUTED
+                        } else if module.changed {
+                            Color::Yellow
+                        } else {
+                            ACCENT
+                        }),
+                    ),
+                    Span::raw(clean(&module.path.to_string_lossy())),
+                    Span::styled(
+                        if !module.initialized {
+                            " · initialize"
+                        } else if module.changed {
+                            " · changed"
+                        } else {
+                            ""
+                        },
+                        Style::default().fg(MUTED),
+                    ),
+                ])
+            })
+            .collect()
+    };
+    let title = if app.repo_tab == 0 {
+        format!(
+            "1 [Repositories] | Submodules ({})",
+            app.snapshot.submodules.len()
+        )
+    } else {
+        format!(
+            "1 Repositories | [Submodules] ({})",
+            app.snapshot.submodules.len()
+        )
+    };
     render_list(
         frame,
         area,
-        "1 Repositories".into(),
+        title,
         app.focus == Panel::Status,
         items,
         (!range.is_empty()).then_some(selected.saturating_sub(range.start)),
     );
+    if app.repo_tab == 1 && app.repository_count() == 0 && area.height > 3 {
+        frame.render_widget(
+            Paragraph::new("No submodules in this repository.")
+                .style(Style::default().fg(MUTED))
+                .wrap(Wrap { trim: false }),
+            area.inner(ratatui::layout::Margin::new(1, 1)),
+        );
+    }
 }
 
 fn draw_refs(frame: &mut Frame, area: Rect, app: &mut App, remote: bool) {
@@ -710,12 +768,7 @@ fn draw_graph(frame: &mut Frame, area: Rect, app: &mut App) {
         let row = graph_line(app, index.row(visual, working_tree_index).unwrap());
         let mut spans = graph_spans(&row.prefix);
         if row.logical.is_some() && row.commit_index.is_none() {
-            let changed = app
-                .snapshot
-                .files
-                .iter()
-                .filter(|file| file.changed())
-                .count();
+            let changed = app.changed_file_count();
             spans.push(Span::styled(
                 elide(
                     &format!("Working tree / Index ({changed})"),
@@ -926,9 +979,7 @@ fn file_line(
     };
     let index = row.status.chars().next().unwrap_or(' ');
     let worktree = row.status.chars().nth(1).unwrap_or(' ');
-    let marker = if app.file_is_marked(&row.path) {
-        "●"
-    } else if row.directory {
+    let marker = if row.directory {
         if app.collapsed.contains(&row.path) && app.search(app.file_panel()).is_empty() {
             "▸"
         } else {
@@ -937,6 +988,7 @@ fn file_line(
     } else {
         " "
     };
+    let checkbox = app.file_checkbox(row);
     let mut spans = vec![
         Span::styled(
             index.to_string(),
@@ -954,7 +1006,16 @@ fn file_line(
                 color
             }),
         ),
-        Span::raw(format!(" {}{marker} ", "  ".repeat(row.depth))),
+        Span::raw(" "),
+        Span::styled(
+            checkbox,
+            Style::default().fg(if matches!(checkbox, "[x] " | "[-] ") {
+                ACCENT
+            } else {
+                MUTED
+            }),
+        ),
+        Span::raw(format!("{}{marker} ", "  ".repeat(row.depth))),
     ];
     let label = clean(&row.label);
     if app.search(app.file_panel()).is_empty() {
@@ -1018,7 +1079,7 @@ fn draw_files(frame: &mut Frame, area: Rect, app: &mut App) {
             file_line(row, app, &query, match_path)
         })
         .collect();
-    let title = if app.stash_inspection_active() {
+    let mut title = if app.stash_inspection_active() {
         format!(
             "7 [Stash] | {}{}",
             clean(&app.stash_file_title()),
@@ -1060,6 +1121,10 @@ fn draw_files(frame: &mut Frame, area: Rect, app: &mut App) {
             if app.inspection_loading { " …" } else { "" }
         )
     };
+    let selected_files = app.file_selected_count();
+    if selected_files > 0 {
+        title.push_str(&format!(" · {selected_files} selected · U clear"));
+    }
     render_list(
         frame,
         area,

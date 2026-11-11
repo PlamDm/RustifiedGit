@@ -1,0 +1,83 @@
+{
+  "date": "2026-11-12",
+  "platform": "macOS arm64",
+  "rust": "1.88.0",
+  "synthetic_fixture": {
+    "files": 100000,
+    "commits": 100000,
+    "references": 5000,
+    "dimensions": "160x42",
+    "rendered_frames": 100
+  },
+  "synthetic_before_optimization": {
+    "app_rebuild_ms": 80.947459,
+    "tree_build_ms": [
+      86.671625,
+      74.175084,
+      74.104333
+    ],
+    "render_100_frames_ms": 36.897334,
+    "search_100k_commits_ms": 181.758375
+  },
+  "synthetic_after_optimization": {
+    "app_rebuild_ms": 43.414291,
+    "tree_build_ms": [
+      56.184667,
+      41.514,
+      40.293042
+    ],
+    "render_100_frames_ms": 23.810209,
+    "search_100k_commits_ms": 20.0255
+  },
+  "llvm_release_comparison": {
+    "before": {
+      "first_commit_ms": [
+        282.052,
+        206.61,
+        214.203,
+        244.449,
+        229.77
+      ],
+      "first_commit_median_ms": 229.77,
+      "snapshots": {
+        "cold_ms": 883.691042,
+        "commits_loaded": 1000,
+        "files": 190280,
+        "iterations": 5,
+        "median_ms": 567.754875,
+        "min_ms": 557.634875,
+        "p95_ms": 883.691042,
+        "references": 1650,
+        "repository": "llvm/llvm-project full clone"
+      }
+    },
+    "after": {
+      "first_commit_ms": [
+        211.716,
+        229.129,
+        182.498,
+        219.485,
+        252.629
+      ],
+      "first_commit_median_ms": 219.485,
+      "snapshots": {
+        "cold_ms": 639.946667,
+        "commits_loaded": 1000,
+        "files": 190280,
+        "iterations": 5,
+        "median_ms": 533.8895,
+        "min_ms": 522.982083,
+        "p95_ms": 639.946667,
+        "references": 1650,
+        "repository": "llvm/llvm-project full clone"
+      }
+    }
+  },
+  "notes": [
+    "Synthetic baseline includes the selection and submodule implementation before performance changes.",
+    "LLVM baseline is the v0.1.0 release executable; terminal launches alternate before and after.",
+    "Five real-terminal launches per binary and five backend snapshots per binary.",
+    "Filesystem caches, concurrent machine activity, and CPU count affect results.",
+    "Parallel commit scoring uses at most eight available CPU threads."
+  ]
+}

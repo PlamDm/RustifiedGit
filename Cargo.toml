@@ -1,6 +1,6 @@
 [package]
 name = "rustifiedgit"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.88"
 description = "A responsive terminal Git client written in Rust"
@@ -9,6 +9,10 @@ license = "MIT"
 [[bin]]
 name = "rustifiedgit"
 path = "src/main.rs"
+
+[[bench]]
+name = "performance"
+harness = false
 
 [dependencies]
 anyhow = "1"

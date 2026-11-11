@@ -59,6 +59,15 @@ Press a number to focus its pane, `Tab`/`Shift+Tab` to cycle, and `+` to zoom.
 Pane **6** contains Details and Output tabs; `[` / `]` switches between them.
 Commands open the Output tab automatically without taking focus from the files
 or graph. `8` remains a shortcut to that tab, not a separate pane.
+
+Pane **1** has **Repositories** and **Submodules** tabs. Press `1`, then `]`
+or `[` to switch tabs. Submodules are listed even when clean or uninitialized.
+Press `Enter` to open a submodule as a repository. On an uninitialized entry,
+Enter initializes it first; press Enter again once the command finishes.
+Use `i` to initialize/update the selected submodule recursively, or `a` for all
+submodules. Command progress appears in pane 6. Inside a submodule, the same tab
+lists its nested submodules and a **Parent repository** row to return to the parent.
+
 In local or remote branches, **Space toggles graph visibility**; **Enter checks
 out** the branch. The graph combines enabled refs and their shared ancestors
 without duplicate commits, preserving Git's merge connections. Visibility is
@@ -210,7 +219,13 @@ Focusing the graph with `5` also returns to normal commit inspection.
   during phases where the command has no progress details to report.
 
 In pane **7**, `Shift+Up` / `Shift+Down` selects files and folders, and `v`
-toggles an individual selection. Selecting a folder includes its descendants.
+toggles a selection. Shift+arrows expand a range from its starting row;
+reversing direction shrinks it. Selecting a folder includes its matching
+descendants, and individual children can be deselected afterward.
+Use `u` to deselect the hovered file or folder, `U` to deselect all, and `Ctrl+a`
+to select all files matching the current filter, including files in collapsed
+folders. Checkboxes show selected `[x]`, unselected `[ ]`, and partially selected
+folders `[-]`. The pane title shows the selected file count.
 `Esc` clears the selection; from a full-screen diff it also returns to files.
 `*` toggles all folders expanded/collapsed, including nested folders; `-` and `=`
 still explicitly collapse and expand them.

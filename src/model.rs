@@ -165,12 +165,22 @@ pub struct Worktree {
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
+pub struct Submodule {
+    pub name: String,
+    pub path: PathBuf,
+    pub url: String,
+    pub initialized: bool,
+    pub changed: bool,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
 pub struct Snapshot {
     pub files: Vec<FileEntry>,
     pub references: Vec<Reference>,
     pub commits: Arc<Vec<Commit>>,
     pub stashes: Vec<Stash>,
     pub worktrees: Vec<Worktree>,
+    pub submodules: Vec<Submodule>,
     pub branch: String,
     pub head: String,
     pub upstream: String,
