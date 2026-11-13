@@ -86,14 +86,18 @@ impl HelpState {
     }
 
     pub fn matches(&self) -> Vec<usize> {
+        if self.query.is_empty() {
+            return (0..self.entries.len()).collect();
+        }
         let query = Query::new(&self.query);
+        let mut scratch = crate::fuzzy::ScoreScratch::default();
         let mut matches: Vec<_> = self
             .entries
             .iter()
             .enumerate()
             .filter_map(|(index, entry)| {
                 query
-                    .score(&entry.search_text())
+                    .score_with_scratch(&entry.search_text(), &mut scratch)
                     .map(|score| (index, score))
             })
             .collect();
