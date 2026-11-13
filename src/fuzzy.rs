@@ -53,8 +53,9 @@ pub(crate) struct ScoreScratch {
     normalized: String,
     characters: Vec<char>,
     bonuses: Vec<i64>,
-    previous: Vec<i64>,
-    current: Vec<i64>,
+    previous: Vec<(usize, i64)>,
+    current: Vec<(usize, i64)>,
+    dense_rows: (Vec<i64>, Vec<i64>),
 }
 
 impl Query {
@@ -191,6 +192,27 @@ impl Query {
         if let Some(original) = original.as_mut() {
             original.clear();
         }
+        if text.is_ascii() {
+            let mut previous: Option<u8> = None;
+            for (source, character) in text.bytes().enumerate() {
+                let bonus = match previous {
+                    None => 12,
+                    Some(before) if !before.is_ascii_alphanumeric() => 12,
+                    Some(before)
+                        if before.is_ascii_lowercase() && character.is_ascii_uppercase() =>
+                    {
+                        8
+                    }
+                    _ => 0,
+                };
+                bonuses.push(bonus);
+                if let Some(original) = original.as_mut() {
+                    original.push(source);
+                }
+                previous = Some(character);
+            }
+            return;
+        }
         let mut previous: Option<char> = None;
         for (source, character) in text.chars().enumerate() {
             let bonus = match previous {
@@ -230,6 +252,7 @@ impl Query {
             bonuses,
             previous,
             current,
+            dense_rows,
         } = scratch;
         let normalized: &str = if self.case_sensitive {
             text
@@ -251,12 +274,23 @@ impl Query {
             return None;
         }
         characters.clear();
-        characters.extend(normalized.chars());
+        if normalized.is_ascii() {
+            characters.extend(normalized.bytes().map(char::from));
+        } else {
+            characters.extend(normalized.chars());
+        }
         self.fill_bonuses(text, bonuses, None);
         let mut total = 0;
         for term in self.terms.iter().filter(|term| !term.excluded) {
             total += match term.kind {
-                Kind::Fuzzy => fuzzy_score(characters, bonuses, &term.chars, previous, current),
+                Kind::Fuzzy => fuzzy_score(
+                    characters,
+                    bonuses,
+                    &term.chars,
+                    previous,
+                    current,
+                    dense_rows,
+                ),
                 _ => {
                     let byte_position = if matches!(term.kind, Kind::Suffix) {
                         normalized.len() - term.text.len()
@@ -285,10 +319,72 @@ fn fuzzy_score(
     text: &[char],
     bonuses: &[i64],
     needle: &[char],
-    previous: &mut Vec<i64>,
-    current: &mut Vec<i64>,
+    previous: &mut Vec<(usize, i64)>,
+    current: &mut Vec<(usize, i64)>,
+    dense_rows: &mut (Vec<i64>, Vec<i64>),
 ) -> i64 {
     const MISS: i64 = i64::MIN / 4;
+    let Some(first) = needle.first() else {
+        return 0;
+    };
+    if needle.len() == 1 {
+        return text
+            .iter()
+            .enumerate()
+            .filter(|(_, actual)| *actual == first)
+            .map(|(index, _)| 16 + bonuses[index] - (index as i64).min(24))
+            .max()
+            .unwrap_or(0);
+    }
+    previous.clear();
+    for (index, actual) in text.iter().enumerate() {
+        if actual == first {
+            previous.push((index, 16 + bonuses[index] - (index as i64).min(24)));
+            // Dense rows are cheaper for repeated digits or letters. Stop
+            // growing sparse state once a substantial share of positions match.
+            if previous.len() > text.len() / 4 {
+                return dense_fuzzy_score(text, bonuses, needle, dense_rows);
+            }
+        }
+    }
+    for wanted in &needle[1..] {
+        current.clear();
+        let mut before = 0;
+        let mut best_gap = MISS;
+        for (index, actual) in text.iter().enumerate() {
+            if actual != wanted {
+                continue;
+            }
+            while before < previous.len() && previous[before].0 < index {
+                let (position, score) = previous[before];
+                best_gap = best_gap.max(score + position as i64);
+                before += 1;
+            }
+            if before == 0 {
+                continue;
+            }
+            let (position, score) = previous[before - 1];
+            let adjacent = if position + 1 == index {
+                score + 24
+            } else {
+                MISS
+            };
+            let separated = best_gap - index as i64 + 13;
+            current.push((index, adjacent.max(separated) + bonuses[index]));
+        }
+        std::mem::swap(previous, current);
+    }
+    previous.iter().map(|(_, score)| *score).max().unwrap_or(0)
+}
+
+fn dense_fuzzy_score(
+    text: &[char],
+    bonuses: &[i64],
+    needle: &[char],
+    rows: &mut (Vec<i64>, Vec<i64>),
+) -> i64 {
+    const MISS: i64 = i64::MIN / 4;
+    let (previous, current) = rows;
     previous.resize(text.len(), MISS);
     previous.fill(MISS);
     current.resize(text.len(), MISS);
@@ -310,8 +406,7 @@ fn fuzzy_score(
                 } else {
                     MISS
                 };
-                let separated = best_gap - index as i64 + 13;
-                adjacent.max(separated) + bonuses[index]
+                adjacent.max(best_gap - index as i64 + 13) + bonuses[index]
             };
         }
         std::mem::swap(previous, current);
@@ -391,4 +486,86 @@ fn fuzzy_positions(text: &[char], bonuses: &[i64], needle: &[char]) -> Vec<usize
     }
     positions.reverse();
     positions
+}
+
+#[cfg(test)]
+mod scoring_tests {
+    use super::*;
+
+    #[test]
+    fn sparse_scores_and_highlight_alignments_match_dense_for_generated_text() {
+        let alphabet = ['a', 'b', 'A', '/', '_', ' ', 'é', 'İ', 'Σ', '🦀'];
+        let query = Query::new("a");
+        let mut seed = 173_u64;
+        let mut scratch = ScoreScratch::default();
+        let mut reference_rows = (Vec::new(), Vec::new());
+        for case in 0..7_000 {
+            let length = case % 64 + 1;
+            let mut source = String::new();
+            for _ in 0..length {
+                seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+                let character = if case % 11 == 0 {
+                    'a'
+                } else {
+                    let available = if case % 3 == 0 { 6 } else { alphabet.len() };
+                    alphabet[(seed >> 32) as usize % available]
+                };
+                source.push(character);
+            }
+            let normalized = source.to_lowercase();
+            let characters: Vec<_> = normalized.chars().collect();
+            let mut bonuses = Vec::new();
+            // Use the general Unicode rules as an oracle for the ASCII fast path.
+            let mut previous: Option<char> = None;
+            for character in source.chars() {
+                let bonus = match previous {
+                    None => 12,
+                    Some(before) if !before.is_alphanumeric() => 12,
+                    Some(before) if before.is_lowercase() && character.is_uppercase() => 8,
+                    _ => 0,
+                };
+                for (index, _) in character.to_lowercase().enumerate() {
+                    bonuses.push(if index == 0 { bonus } else { 0 });
+                }
+                previous = Some(character);
+            }
+            query.fill_bonuses(&source, &mut scratch.bonuses, None);
+            assert_eq!(scratch.bonuses, bonuses, "boundary bonuses for {source:?}");
+            let needle: Vec<_> = characters
+                .iter()
+                .copied()
+                .skip(case % characters.len())
+                .step_by(case % 5 + 1)
+                .take(8)
+                .collect();
+            let actual = fuzzy_score(
+                &characters,
+                &bonuses,
+                &needle,
+                &mut scratch.previous,
+                &mut scratch.current,
+                &mut scratch.dense_rows,
+            );
+            let expected = dense_fuzzy_score(&characters, &bonuses, &needle, &mut reference_rows);
+            assert_eq!(actual, expected, "{needle:?} in {source:?}");
+
+            let positions = fuzzy_positions(&characters, &bonuses, &needle);
+            assert_eq!(positions.len(), needle.len());
+            let first = positions[0];
+            let mut aligned = 16 + bonuses[first] - (first as i64).min(24);
+            for pair in positions.windows(2) {
+                let (previous, current) = (pair[0], pair[1]);
+                aligned += bonuses[current]
+                    + if current == previous + 1 {
+                        24
+                    } else {
+                        13 + previous as i64 - current as i64
+                    };
+            }
+            assert_eq!(
+                aligned, actual,
+                "highlight alignment for {needle:?} in {source:?}"
+            );
+        }
+    }
 }

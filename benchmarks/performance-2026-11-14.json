@@ -1,0 +1,326 @@
+{
+  "baseline": "v0.1.1",
+  "samples": {
+    "before": [
+      {
+        "app_rebuild_ms": 43.132042000000006,
+        "collapsed_tree_build_ms": [
+          33.535334,
+          32.857083,
+          32.978167
+        ],
+        "commit_inspection_ms": [
+          3.405666,
+          3.3032920000000003,
+          3.4979999999999998,
+          3.5355,
+          10.911624999999999
+        ],
+        "commits": 100000,
+        "files": 100000,
+        "help_render_50_frames_ms": 28.115000000000002,
+        "long_diff_render_50_frames_ms": 694.770709,
+        "references": 5000,
+        "render_100_frames_ms": 23.159665999999998,
+        "search_100k_commits_ms": 22.539,
+        "select_all_first_frame_ms": 8.216917,
+        "selected_100_file_preview_ms": [
+          533.854709,
+          512.7866250000001,
+          513.320959,
+          515.519542,
+          638.071625
+        ],
+        "selected_render_100_frames_ms": 101.923708,
+        "tree_build_ms": [
+          49.749416999999994,
+          43.571458,
+          41.845542
+        ]
+      },
+      {
+        "app_rebuild_ms": 42.874791,
+        "collapsed_tree_build_ms": [
+          32.586458,
+          34.138957999999995,
+          33.440375
+        ],
+        "commit_inspection_ms": [
+          3.379791,
+          3.701583,
+          3.316917,
+          2.953417,
+          3.31575
+        ],
+        "commits": 100000,
+        "files": 100000,
+        "help_render_50_frames_ms": 28.171791000000002,
+        "long_diff_render_50_frames_ms": 674.349875,
+        "references": 5000,
+        "render_100_frames_ms": 23.188416,
+        "search_100k_commits_ms": 21.266542,
+        "select_all_first_frame_ms": 8.292208,
+        "selected_100_file_preview_ms": [
+          517.422917,
+          651.0585,
+          554.543833,
+          514.916459,
+          516.004458
+        ],
+        "selected_render_100_frames_ms": 99.549875,
+        "tree_build_ms": [
+          40.923583,
+          40.428042,
+          40.116082999999996
+        ]
+      },
+      {
+        "app_rebuild_ms": 43.039833,
+        "collapsed_tree_build_ms": [
+          33.298666,
+          33.163291,
+          33.119583
+        ],
+        "commit_inspection_ms": [
+          3.2394160000000003,
+          3.3959580000000003,
+          3.511333,
+          3.2931660000000003,
+          3.74375
+        ],
+        "commits": 100000,
+        "files": 100000,
+        "help_render_50_frames_ms": 28.084,
+        "long_diff_render_50_frames_ms": 750.210083,
+        "references": 5000,
+        "render_100_frames_ms": 23.183875,
+        "search_100k_commits_ms": 21.691916,
+        "select_all_first_frame_ms": 8.705499999999999,
+        "selected_100_file_preview_ms": [
+          524.9407080000001,
+          518.108583,
+          523.66675,
+          519.4776250000001,
+          678.8385000000001
+        ],
+        "selected_render_100_frames_ms": 100.784584,
+        "tree_build_ms": [
+          39.77025,
+          40.810125,
+          40.360958000000004
+        ]
+      }
+    ],
+    "after": [
+      {
+        "app_rebuild_ms": 38.68,
+        "collapsed_tree_build_ms": [
+          12.059458000000001,
+          12.124917,
+          12.158291
+        ],
+        "commit_inspection_ms": [
+          3.07325,
+          2.8548340000000003,
+          2.963084,
+          2.843958,
+          3.205333
+        ],
+        "commits": 100000,
+        "files": 100000,
+        "help_render_50_frames_ms": 20.018291,
+        "long_diff_render_50_frames_ms": 11.967500000000001,
+        "references": 5000,
+        "render_100_frames_ms": 23.274292,
+        "search_100k_commits_ms": 13.084416,
+        "select_all_first_frame_ms": 8.516417,
+        "selected_100_file_preview_ms": [
+          15.206249999999999,
+          15.001541999999999,
+          14.619667,
+          14.465667,
+          14.327459000000001
+        ],
+        "selected_render_100_frames_ms": 49.39491700000001,
+        "tree_build_ms": [
+          36.811792000000004,
+          35.470459000000005,
+          36.37125
+        ]
+      },
+      {
+        "app_rebuild_ms": 36.980458,
+        "collapsed_tree_build_ms": [
+          11.692875,
+          11.718416000000001,
+          11.848625
+        ],
+        "commit_inspection_ms": [
+          2.955958,
+          3.0954580000000003,
+          2.683125,
+          2.996208,
+          2.968584
+        ],
+        "commits": 100000,
+        "files": 100000,
+        "help_render_50_frames_ms": 20.121,
+        "long_diff_render_50_frames_ms": 11.844792,
+        "references": 5000,
+        "render_100_frames_ms": 22.674208,
+        "search_100k_commits_ms": 12.288667,
+        "select_all_first_frame_ms": 8.072167,
+        "selected_100_file_preview_ms": [
+          15.123375,
+          14.682958,
+          14.441125000000001,
+          14.983125,
+          14.83725
+        ],
+        "selected_render_100_frames_ms": 45.610208,
+        "tree_build_ms": [
+          35.138625,
+          35.224833,
+          35.132125
+        ]
+      },
+      {
+        "app_rebuild_ms": 47.396083,
+        "collapsed_tree_build_ms": [
+          12.011249999999999,
+          12.043375000000001,
+          12.479667
+        ],
+        "commit_inspection_ms": [
+          3.168917,
+          2.9499589999999998,
+          3.4007080000000003,
+          2.8726659999999997,
+          2.8922079999999997
+        ],
+        "commits": 100000,
+        "files": 100000,
+        "help_render_50_frames_ms": 20.323959,
+        "long_diff_render_50_frames_ms": 12.148042,
+        "references": 5000,
+        "render_100_frames_ms": 27.590375,
+        "search_100k_commits_ms": 16.121541999999998,
+        "select_all_first_frame_ms": 8.698584,
+        "selected_100_file_preview_ms": [
+          15.401708,
+          14.590208,
+          15.289916,
+          14.646832999999999,
+          14.9905
+        ],
+        "selected_render_100_frames_ms": 45.910542,
+        "tree_build_ms": [
+          36.344792,
+          35.663458,
+          35.351583
+        ]
+      }
+    ]
+  },
+  "medians": {
+    "before": {
+      "app_rebuild_ms": 43.039833,
+      "collapsed_tree_build_ms": 33.163291,
+      "commit_inspection_ms": 3.3959580000000003,
+      "help_render_50_frames_ms": 28.115000000000002,
+      "long_diff_render_50_frames_ms": 694.770709,
+      "render_100_frames_ms": 23.183875,
+      "search_100k_commits_ms": 21.691916,
+      "select_all_first_frame_ms": 8.292208,
+      "selected_100_file_preview_ms": 519.4776250000001,
+      "selected_render_100_frames_ms": 100.784584,
+      "tree_build_ms": 40.810125
+    },
+    "after": {
+      "app_rebuild_ms": 38.68,
+      "collapsed_tree_build_ms": 12.043375000000001,
+      "commit_inspection_ms": 2.963084,
+      "help_render_50_frames_ms": 20.121,
+      "long_diff_render_50_frames_ms": 11.967500000000001,
+      "render_100_frames_ms": 23.274292,
+      "search_100k_commits_ms": 13.084416,
+      "select_all_first_frame_ms": 8.516417,
+      "selected_100_file_preview_ms": 14.83725,
+      "selected_render_100_frames_ms": 45.910542,
+      "tree_build_ms": 35.470459000000005
+    }
+  },
+  "date": "2026-11-14",
+  "platform": "macOS arm64",
+  "rust": "1.88.0",
+  "release": "v0.1.2",
+  "llvm": {
+    "before": {
+      "first_commit_ms": [
+        769.31,
+        156.347,
+        221.877,
+        225.493,
+        189.237
+      ],
+      "first_commit_median_ms": 221.877,
+      "snapshots": {
+        "cold_ms": 760.655,
+        "commits_loaded": 1000,
+        "files": 190280,
+        "iterations": 5,
+        "median_ms": 537.612791,
+        "min_ms": 532.059666,
+        "p95_ms": 760.655,
+        "references": 1686,
+        "repository": "llvm/llvm-project full clone"
+      }
+    },
+    "after": {
+      "first_commit_ms": [
+        327.716,
+        160.749,
+        143.719,
+        203.684,
+        204.938
+      ],
+      "first_commit_median_ms": 203.684,
+      "snapshots": {
+        "cold_ms": 529.134208,
+        "commits_loaded": 1000,
+        "files": 190280,
+        "iterations": 5,
+        "median_ms": 531.383292,
+        "min_ms": 529.134208,
+        "p95_ms": 694.0147079999999,
+        "references": 1686,
+        "repository": "llvm/llvm-project full clone"
+      }
+    }
+  },
+  "method": {
+    "runs": 3,
+    "ordering": "alternating v0.1.1 and optimized executable",
+    "fixture_files": 100000,
+    "fixture_commits": 100000,
+    "fixture_references": 5000,
+    "terminal": "160x42",
+    "long_diff": {
+      "lines": 30,
+      "ascii_characters_per_line": 200001,
+      "frames": 50
+    },
+    "preview": {
+      "files": 100,
+      "samples_per_run": 5
+    },
+    "llvm_terminal_runs_per_binary": 5,
+    "llvm_snapshot_runs_per_binary": 5
+  },
+  "limitations": [
+    "Local measurements vary with CPU scheduling and filesystem caches.",
+    "The expanded benchmark harness was compiled against each version before alternating runs.",
+    "Large working-tree snapshots remain dominated by Git status.",
+    "Printable ASCII long lines use a viewport fast path; Unicode, ANSI and control text retains the previous sanitization and grapheme handling."
+  ]
+}

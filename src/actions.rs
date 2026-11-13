@@ -63,6 +63,7 @@ pub fn context_key(app: &App) -> Option<String> {
     let mut catalog = Catalog {
         app,
         items: Vec::new(),
+        limit: 1,
     };
     catalog.add(
         "universal",
@@ -77,10 +78,14 @@ pub fn context_key(app: &App) -> Option<String> {
 struct Catalog<'a> {
     app: &'a App,
     items: Vec<Action>,
+    limit: usize,
 }
 
 impl Catalog<'_> {
     fn add(&mut self, group: &str, name: &str, fallback: &str, label: &str, description: &str) {
+        if self.items.len() >= self.limit {
+            return;
+        }
         let bindings: Vec<&str> = match self
             .app
             .config
@@ -396,9 +401,18 @@ impl Catalog<'_> {
 }
 
 pub fn for_app(app: &App) -> Vec<Action> {
+    collect_actions(app, usize::MAX)
+}
+
+pub fn for_footer(app: &App) -> Vec<Action> {
+    collect_actions(app, 5)
+}
+
+fn collect_actions(app: &App, limit: usize) -> Vec<Action> {
     let mut catalog = Catalog {
         app,
         items: Vec::new(),
+        limit,
     };
     let writable = app.busy.is_none();
     catalog.add(
@@ -1172,6 +1186,9 @@ pub fn for_app(app: &App) -> Vec<Action> {
         "Show the complete keyboard reference.",
     );
     for command in &app.config.custom_commands {
+        if catalog.items.len() >= limit {
+            break;
+        }
         if !in_context(&command.context, app) {
             continue;
         }

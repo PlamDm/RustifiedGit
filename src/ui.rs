@@ -134,6 +134,19 @@ fn clean(text: &str) -> String {
     strip_ansi(text).replace('\r', "\\r").replace('\n', "\\n")
 }
 
+fn clean_viewport(text: &str, offset: usize, width: usize) -> Cow<'_, str> {
+    let end = offset.saturating_add(width).min(text.len());
+    let printable = |byte: &u8| byte.is_ascii_graphic() || *byte == b' ';
+    // A printable ASCII boundary also closes the final visible grapheme. Keep
+    // the existing Unicode/escape handling whenever that cannot be established.
+    if text.as_bytes()[..end].iter().all(printable)
+        && text.as_bytes().get(end).is_none_or(printable)
+    {
+        return Cow::Borrowed(&text[offset.min(end)..end]);
+    }
+    Cow::Owned(clean(text).chars().skip(offset).collect())
+}
+
 fn elide(text: &str, width: usize) -> String {
     if Line::raw(text).width() <= width {
         return text.to_owned();
@@ -1239,10 +1252,11 @@ fn draw_diff(frame: &mut Frame, area: Rect, app: &mut App) {
                     index == app.diff_line
                 };
             Line::styled(
-                clean(line)
-                    .chars()
-                    .skip(app.horizontal_scroll)
-                    .collect::<String>(),
+                clean_viewport(
+                    line,
+                    app.horizontal_scroll,
+                    area.width.saturating_sub(2) as usize,
+                ),
                 Style::default()
                     .fg(color)
                     .bg(if selected { SELECTED } else { Color::Reset }),
@@ -1283,7 +1297,7 @@ fn draw_output(frame: &mut Frame, area: Rect, app: &mut App) {
         .take(height)
         .map(|line| {
             Line::styled(
-                clean(line),
+                clean_viewport(line, 0, area.width.saturating_sub(2) as usize),
                 Style::default().fg(if line.starts_with("$ ") {
                     Color::Yellow
                 } else if line.starts_with('✗') {
@@ -1435,7 +1449,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             }
         }
     }
-    let context_actions = actions::for_app(app);
+    let context_actions = actions::for_footer(app);
     let context_help = context_actions
         .iter()
         .take(5)
@@ -1635,11 +1649,14 @@ fn draw_help(frame: &mut Frame, area: Rect, state: &crate::help::HelpState) {
         );
     } else {
         let selected = state.selected.min(matches.len() - 1);
+        let offset = selected.saturating_sub(parts[2].height.saturating_sub(1) as usize);
         let rows: Vec<_> = matches
             .iter()
+            .skip(offset)
+            .take(parts[2].height as usize)
             .map(|index| ListItem::new(help_row(&state.entries[*index], &query, width).0))
             .collect();
-        let mut list_state = ListState::default().with_selected(Some(selected));
+        let mut list_state = ListState::default().with_selected(Some(selected - offset));
         frame.render_stateful_widget(
             List::new(rows)
                 .highlight_style(Style::default().bg(SELECTED))
@@ -1913,4 +1930,46 @@ pub fn hit_test(area: Rect, app: &App, x: u16, y: u16) -> Option<(Panel, usize)>
         ));
     }
     None
+}
+
+#[cfg(test)]
+mod viewport_tests {
+    use super::*;
+    use ratatui::{buffer::Buffer, widgets::Widget};
+
+    #[test]
+    fn clipped_text_preserves_sanitizing_scrolling_and_grapheme_boundaries() {
+        let long_ascii = "abc xyz ".repeat(100_000);
+        let texts = [
+            long_ascii.as_str(),
+            "plain text",
+            "e\u{301}x",
+            "abcde\u{301}f",
+            "abc👩‍💻xyz",
+            "界界abc",
+            "a\tbb\r\nend",
+            "a\x1b[31mbb\x1b[0m界end",
+            "a\x1b]0;title\x07\u{301}bc",
+            "x\x1b[0m\u{301}abc",
+            "",
+        ];
+        for text in texts {
+            for offset in [0, 1, 4, 20, text.len() + 1] {
+                for width in [1, 2, 5, 12, 80] {
+                    let area = Rect::new(0, 0, width, 1);
+                    let mut expected = Buffer::empty(area);
+                    let mut actual = Buffer::empty(area);
+                    Paragraph::new(clean(text).chars().skip(offset).collect::<String>())
+                        .render(area, &mut expected);
+                    Paragraph::new(clean_viewport(text, offset, width as usize))
+                        .render(area, &mut actual);
+                    assert_eq!(actual, expected, "offset {offset}, width {width}");
+                }
+            }
+        }
+        assert!(matches!(
+            clean_viewport(&long_ascii, 10, 80),
+            Cow::Borrowed(_)
+        ));
+    }
 }

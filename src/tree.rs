@@ -1,7 +1,7 @@
 use crate::{fuzzy::Query, model::FileEntry};
 use std::{
     collections::{BTreeMap, HashSet},
-    ffi::OsString,
+    ffi::OsStr,
     path::{Path, PathBuf},
 };
 
@@ -18,12 +18,13 @@ pub struct Row {
 }
 
 #[derive(Default)]
-struct Node {
-    children: BTreeMap<OsString, Node>,
+struct Node<'a> {
+    children: BTreeMap<&'a OsStr, Node<'a>>,
     file_index: Option<usize>,
     path: PathBuf,
     changed: bool,
     ignored: bool,
+    directory: bool,
 }
 
 pub fn fuzzy_match(text: &str, needle: &str) -> bool {
@@ -61,9 +62,10 @@ pub fn rows(
     for (index, file) in files.iter().enumerate().filter(|(_, file)| visible(file)) {
         let mut node = &mut root;
         let mut path = PathBuf::new();
-        for component in file.path.components() {
+        let mut components = file.path.components().peekable();
+        while let Some(component) = components.next() {
             path.push(component.as_os_str());
-            let key = component.as_os_str().to_owned();
+            let key = component.as_os_str();
             node = node.children.entry(key).or_insert_with(|| Node {
                 path: path.clone(),
                 ignored: true,
@@ -71,11 +73,18 @@ pub fn rows(
             });
             node.changed |= file.changed();
             node.ignored &= file.ignored();
+            let directory = components.peek().is_some();
+            node.directory |= directory;
+            if directory && search.is_empty() && collapsed.contains(&path) {
+                break;
+            }
+            if !directory {
+                node.file_index = Some(index);
+            }
         }
-        node.file_index = Some(index);
     }
     fn flatten(
-        node: &Node,
+        node: &Node<'_>,
         files: &[FileEntry],
         depth: usize,
         collapsed: &HashSet<PathBuf>,
@@ -86,14 +95,10 @@ pub fn rows(
         for child in node
             .children
             .values()
-            .filter(|child| !child.children.is_empty())
-            .chain(
-                node.children
-                    .values()
-                    .filter(|child| child.children.is_empty()),
-            )
+            .filter(|child| child.directory)
+            .chain(node.children.values().filter(|child| !child.directory))
         {
-            let directory = !child.children.is_empty();
+            let directory = child.directory;
             output.push(Row {
                 path: child.path.clone(),
                 label: child

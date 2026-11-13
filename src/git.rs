@@ -916,12 +916,22 @@ impl Repository {
         maximum: usize,
         cancel: &Cancellation,
     ) -> Result<bool> {
+        let paths: Vec<_> = std::iter::once(path).chain(old_path).collect();
+        self.files_too_large(&paths, commit, maximum, cancel)
+    }
+
+    fn files_too_large(
+        &self,
+        paths: &[&Path],
+        commit: Option<&str>,
+        maximum: usize,
+        cancel: &Cancellation,
+    ) -> Result<bool> {
         if maximum == 0 {
             return Ok(false);
         }
-        let paths: Vec<_> = std::iter::once(path).chain(old_path).collect();
         if commit.is_none() {
-            for path in &paths {
+            for path in paths {
                 if fs::symlink_metadata(self.root.join(path))
                     .is_ok_and(|metadata| metadata.is_file() && metadata.len() > maximum as u64)
                 {
@@ -929,6 +939,7 @@ impl Repository {
                 }
             }
             let mut args: Vec<OsString> = vec![
+                "--literal-pathspecs".into(),
                 "ls-files".into(),
                 "--stage".into(),
                 "-z".into(),
@@ -975,39 +986,61 @@ impl Repository {
                 vec!["HEAD".to_owned()]
             };
             for reference in refs {
-                let mut args: Vec<OsString> = vec![
-                    "ls-tree".into(),
-                    "-r".into(),
-                    "-l".into(),
-                    "-z".into(),
-                    reference.into(),
-                    "--".into(),
-                ];
-                args.extend(paths.iter().map(|path| path.as_os_str().to_owned()));
-                let output = process::run(
-                    &self.root,
-                    &CommandSpec::git(args),
-                    cancel,
-                    READ_LIMIT,
-                    None,
-                    READ_TIMEOUT,
-                )?;
-                if output.code != 0 {
-                    continue;
-                }
-                for entry in output.stdout.split(|byte| *byte == 0) {
-                    let header = entry
-                        .split(|byte| *byte == b'\t')
-                        .next()
-                        .unwrap_or_default();
-                    if String::from_utf8_lossy(header)
-                        .split_whitespace()
-                        .nth(3)
-                        .and_then(|size| size.parse::<usize>().ok())
-                        .is_some_and(|size| size > maximum)
-                    {
-                        return Ok(true);
+                let mut start = 0;
+                while start < paths.len() {
+                    cancel.check()?;
+                    // Keep native command lines below Windows' argument limit,
+                    // including quoting, while batching ordinary selections.
+                    let mut end = start;
+                    let mut argument_bytes = 0;
+                    while end < paths.len() {
+                        let bytes = paths[end].as_os_str().len().saturating_mul(2) + 3;
+                        if end > start && argument_bytes + bytes > 8 * 1024 {
+                            break;
+                        }
+                        argument_bytes += bytes;
+                        end += 1;
                     }
+                    let mut args: Vec<OsString> = vec![
+                        "--literal-pathspecs".into(),
+                        "ls-tree".into(),
+                        "-r".into(),
+                        "-l".into(),
+                        "-z".into(),
+                        reference.clone().into(),
+                        "--".into(),
+                    ];
+                    args.extend(
+                        paths[start..end]
+                            .iter()
+                            .map(|path| path.as_os_str().to_owned()),
+                    );
+                    let output = process::run(
+                        &self.root,
+                        &CommandSpec::git(args),
+                        cancel,
+                        READ_LIMIT,
+                        None,
+                        READ_TIMEOUT,
+                    )?;
+                    if output.code != 0 {
+                        break;
+                    }
+                    for entry in output.stdout.split(|byte| *byte == 0) {
+                        let header = entry
+                            .split(|byte| *byte == b'\t')
+                            .next()
+                            .unwrap_or_default();
+                        if String::from_utf8_lossy(header)
+                            .split_whitespace()
+                            .nth(3)
+                            .and_then(|size| size.parse::<usize>().ok())
+                            .is_some_and(|size| size > maximum)
+                        {
+                            return Ok(true);
+                        }
+                    }
+                    start = end;
                 }
             }
         }
@@ -1089,23 +1122,21 @@ impl Repository {
                     paths.len(),
                     &oid[..oid.len().min(8)]
                 );
-                for path in paths {
-                    if !explicit
-                        && self.file_too_large(
-                            path,
-                            None,
-                            Some(oid),
-                            settings.diff_preview_max_file_bytes,
-                            cancel,
-                        )?
-                    {
-                        return Ok(Preview {
-                            title,
-                            text: "Automatic preview skipped: a selected file exceeds the preview limit. Press 0 or Enter to open it.".into(),
-                            suppressed: true,
-                            ..Preview::default()
-                        });
-                    }
+                let selected_paths: Vec<_> = paths.iter().map(PathBuf::as_path).collect();
+                if !explicit
+                    && self.files_too_large(
+                        &selected_paths,
+                        Some(oid),
+                        settings.diff_preview_max_file_bytes,
+                        cancel,
+                    )?
+                {
+                    return Ok(Preview {
+                        title,
+                        text: "Automatic preview skipped: a selected file exceeds the preview limit. Press 0 or Enter to open it.".into(),
+                        suppressed: true,
+                        ..Preview::default()
+                    });
                 }
                 args = commit_files_diff(oid, paths).args;
                 args.insert(2, format!("--unified={context}").into());
@@ -1479,30 +1510,39 @@ impl Repository {
     }
 
     pub fn inspect_commit(&self, oid: &str, cancel: &Cancellation) -> Result<CommitInspection> {
-        let (files, details) = thread::scope(|scope| {
-            let files = scope.spawn(|| self.commit_files(oid, cancel));
-            let output = self.read(
-                [
-                    "show",
-                    "--no-patch",
-                    "--format=%H%x00%B%x00%an%x00%ae%x00%cn%x00%ce%x00%cI%x00%P",
-                    oid,
-                    "--",
-                ],
-                cancel,
-            );
-            (files.join().unwrap(), output)
-        });
-        let details = details?;
-        let fields: Vec<_> = without_newline(&details.stdout)
-            .split(|byte| *byte == 0)
-            .collect();
-        if fields.len() != 8 {
+        // Metadata and the changed-file list each previously had a 64 MiB
+        // allowance. Preserve their combined capacity in the single read.
+        let output = process::run(
+            &self.root,
+            &CommandSpec::git([
+                "show",
+                "--format=format:%H%x00%B%x00%an%x00%ae%x00%cn%x00%ce%x00%cI%x00%P%x00",
+                "--name-status",
+                "--root",
+                "--first-parent",
+                "-m",
+                "-z",
+                "-M",
+                "--no-color",
+                oid,
+                "--",
+            ]),
+            cancel,
+            2 * READ_LIMIT,
+            None,
+            READ_TIMEOUT,
+        )?;
+        if output.truncated {
+            bail!("Commit inspection exceeded the 128 MiB read limit");
+        }
+        let output = output.success()?;
+        let fields: Vec<_> = output.stdout.splitn(9, |byte| *byte == 0).collect();
+        if fields.len() != 9 {
             bail!("Invalid commit detail response");
         }
         let field = |index| String::from_utf8_lossy(fields[index]).into_owned();
         Ok(CommitInspection {
-            files: files?,
+            files: parse_changed_files(fields[8].strip_prefix(b"\n").unwrap_or(fields[8])),
             details: CommitDetails {
                 oid: field(0),
                 message: field(1).trim_end().to_owned(),

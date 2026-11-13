@@ -1,5 +1,46 @@
 # Recorded performance
 
+## November 14 optimization pass
+
+Compared with v0.1.1 on macOS arm64 using the same expanded benchmark harness
+and three alternating runs of each optimized executable. The fixture contains
+100,000 files, 100,000 commits and 5,000 references at 160×42. Raw samples and
+additional measurements are in
+[performance-2026-11-14.json](benchmarks/performance-2026-11-14.json).
+
+| Workload | v0.1.1 | v0.1.2 |
+| --- | ---: | ---: |
+| Build expanded file tree | 40.81 ms | 35.47 ms |
+| Build collapsed file tree | 33.16 ms | 12.04 ms |
+| Draw 100 frames with all files selected | 100.78 ms | 45.91 ms |
+| Draw 50 help-menu frames | 28.12 ms | 20.12 ms |
+| Draw 50 frames of long ASCII diff lines | 694.77 ms | 11.97 ms |
+| Preview 100 selected commit files with automatic size checks | 519.48 ms | 14.84 ms |
+| Search 100,000 matching commits | 21.69 ms | 13.08 ms |
+
+The long-line fixture has 30 lines of 200,001 printable ASCII characters each.
+The renderer prepares the visible part of these lines. Existing Unicode,
+ANSI, control-character and grapheme behavior is covered by buffer-equivalence
+tests. Ordinary short-line rendering measured 23.18 and 23.27 ms for 100 frames.
+
+File trees borrow component keys while building and aggregate collapsed
+directories without allocating their hidden children. Folder selection counts
+are reused during drawing. Help formats its visible rows, and the footer builds
+its five displayed actions. Selected-file size checks batch literal paths into
+bounded Git commands. Commit metadata and changed paths load in one read.
+Fuzzy scoring uses sparse match positions, ASCII preparation, and a dense
+fallback for repeated characters; score and highlight equivalence are tested.
+
+Five alternating real-terminal launches on LLVM (190,280 tracked files)
+reached the first commit in 221.88 ms median with v0.1.1 and 203.68 ms with
+v0.1.2. Worker results are checked more promptly while reads are pending.
+Five backend snapshots per executable measured 537.61 and 531.38 ms median.
+Git's full working-tree scan remains the main cost of these snapshots.
+Startup samples vary with cache state and machine activity.
+
+Reproduce the expanded synthetic workload with
+`cargo bench --bench performance --locked`.
+
 ## November 12 optimization pass
 
 Measured on macOS arm64 with Rust 1.88.0. The synthetic workload contains

@@ -236,12 +236,11 @@ fn run(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
             }
         }
         if event::poll(Duration::from_millis(
-            if app.loading
-                || app.history_loading
-                || app.inspection_loading
-                || app.preview_loading
-                || app.busy.is_some()
-            {
+            if app.loading || app.history_loading || app.inspection_loading || app.preview_loading {
+                // Worker results are delivered independently of terminal input.
+                // Pick them up promptly without redrawing unchanged frames.
+                4
+            } else if app.busy.is_some() {
                 16
             } else {
                 40

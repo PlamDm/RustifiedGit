@@ -18,7 +18,7 @@ use anyhow::{Context, Result, bail};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::{
     cell::RefCell,
-    collections::{HashSet, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     env,
     ffi::OsString,
     path::{Path, PathBuf},
@@ -184,6 +184,7 @@ pub struct App {
     pub marked: HashSet<PathBuf>,
     pub marked_commit_files: HashSet<PathBuf>,
     file_range: Option<FileRange>,
+    file_checkbox_cache: RefCell<Option<HashMap<PathBuf, (usize, usize)>>>,
     pub repo_tab: usize,
     repository_cursors: [(usize, usize); 2],
     pub copied_commits: Vec<String>,
@@ -325,6 +326,7 @@ impl App {
             marked: HashSet::new(),
             marked_commit_files: HashSet::new(),
             file_range: None,
+            file_checkbox_cache: RefCell::new(None),
             repo_tab: 0,
             repository_cursors: [(0, 0); 2],
             copied_commits: Vec::new(),
@@ -458,6 +460,7 @@ impl App {
         }
     }
     fn file_marks_mut(&mut self) -> &mut HashSet<PathBuf> {
+        *self.file_checkbox_cache.get_mut() = None;
         if self.file_panel() == Panel::CommitFiles {
             &mut self.marked_commit_files
         } else {
@@ -526,17 +529,32 @@ impl App {
                 "[ ] "
             };
         }
-        if !self.file_is_marked(&row.path) {
+        if self.file_marks().is_empty() {
             return "[ ] ";
         }
-        if self
-            .selectable_files()
-            .filter(|file| file.path.starts_with(&row.path))
-            .all(|file| self.file_marks().contains(&file.path))
-        {
-            "[x] "
-        } else {
-            "[-] "
+        let mut cache = self.file_checkbox_cache.borrow_mut();
+        let counts = cache.get_or_insert_with(|| {
+            let mut counts: HashMap<_, _> = self
+                .file_rows(self.file_panel())
+                .iter()
+                .filter(|row| row.directory)
+                .map(|row| (row.path.clone(), (0, 0)))
+                .collect();
+            for file in self.selectable_files() {
+                let selected = usize::from(self.file_marks().contains(&file.path));
+                for ancestor in file.path.ancestors() {
+                    if let Some((marked, total)) = counts.get_mut(ancestor) {
+                        *marked += selected;
+                        *total += 1;
+                    }
+                }
+            }
+            counts
+        });
+        match counts.get(&row.path) {
+            Some((0, _)) | None => "[ ] ",
+            Some((selected, total)) if selected == total => "[x] ",
+            Some(_) => "[-] ",
         }
     }
     fn clear_file_marks(&mut self) -> bool {
@@ -600,10 +618,14 @@ impl App {
         let cursor = self.selected(self.focus);
         let mut marks = range.base.clone();
         let range_rows = &rows[anchor.min(cursor)..=anchor.max(cursor)];
+        let range_paths: HashSet<_> = range_rows.iter().map(|row| row.path.as_path()).collect();
         marks.extend(
             self.selectable_paths(Path::new(""))
                 .into_iter()
-                .filter(|path| range_rows.iter().any(|row| path.starts_with(&row.path))),
+                .filter(|path| {
+                    path.ancestors()
+                        .any(|ancestor| range_paths.contains(ancestor))
+                }),
         );
         *self.file_marks_mut() = marks;
         self.file_range = Some(range);
@@ -741,6 +763,7 @@ impl App {
         }
     }
     fn rebuild_commit_rows(&mut self) {
+        *self.file_checkbox_cache.get_mut() = None;
         self.commit_rows = tree::rows(
             &self.commit_files,
             self.config.gui.show_file_tree,
@@ -751,6 +774,7 @@ impl App {
         );
     }
     fn rebuild_stash_rows(&mut self) {
+        *self.file_checkbox_cache.get_mut() = None;
         self.stash_rows = tree::rows(
             &self.stash_files,
             self.config.gui.show_file_tree,
@@ -762,6 +786,7 @@ impl App {
         self.selections[7] = self.selections[7].min(self.stash_rows.len().saturating_sub(1));
     }
     fn clear_stash_inspection(&mut self) {
+        *self.file_checkbox_cache.get_mut() = None;
         self.stash_context = false;
         self.workers.stash_files.cancel();
         self.stash_inspection_oid = None;
@@ -826,6 +851,7 @@ impl App {
         self.stash_inspection_loading
     }
     fn rebuild_head_rows(&mut self) {
+        *self.file_checkbox_cache.get_mut() = None;
         self.head_rows = tree::rows(
             &self.head_files,
             self.config.gui.show_file_tree,
@@ -1123,6 +1149,7 @@ impl App {
         .collect()
     }
     fn sync_inspection(&mut self) {
+        *self.file_checkbox_cache.get_mut() = None;
         if self.comparison.is_some() {
             if self.focus != Panel::Stash {
                 self.side = if self.head_tree_tab {
@@ -1213,6 +1240,7 @@ impl App {
         }
     }
     pub fn select_graph_row(&mut self, logical_index: usize) {
+        *self.file_checkbox_cache.get_mut() = None;
         self.file_range = None;
         self.clear_stash_inspection();
         self.close_comparison();
@@ -1481,6 +1509,7 @@ impl App {
         }
     }
     pub fn rebuild(&mut self) {
+        *self.file_checkbox_cache.get_mut() = None;
         self.file_range = None;
         self.file_stats =
             self.snapshot
@@ -2084,6 +2113,9 @@ impl App {
         }
     }
     pub fn set_focus(&mut self, panel: Panel) {
+        if panel != self.focus {
+            *self.file_checkbox_cache.get_mut() = None;
+        }
         if panel != self.focus {
             self.file_range = None;
         }
@@ -3577,6 +3609,7 @@ impl App {
         } else if key_matches("v", key) {
             if let Some(row) = self.row() {
                 let path = row.path.clone();
+                *self.file_checkbox_cache.get_mut() = None;
                 if !self.marked.remove(&path) {
                     self.marked.insert(path);
                 }
