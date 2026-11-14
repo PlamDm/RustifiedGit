@@ -208,6 +208,9 @@ pub struct App {
     pub output_follow: bool,
     pub modal: Option<Modal>,
     pub message_scroll: usize,
+    pub message_selection: crate::recovery::MessageSelection,
+    pub last_command_error: Option<String>,
+    recovery_message: Option<String>,
     pub message_max_scroll: usize,
     pub message_page_size: usize,
     pub pending_external: Option<CommandSpec>,
@@ -350,6 +353,9 @@ impl App {
             output_follow: true,
             modal: None,
             message_scroll: 0,
+            message_selection: crate::recovery::MessageSelection::default(),
+            last_command_error: None,
+            recovery_message: None,
             message_max_scroll: 0,
             message_page_size: 8,
             pending_external: None,
@@ -675,7 +681,10 @@ impl App {
         let enable = !references
             .iter()
             .all(|reference| self.branch_visible(reference));
-        let refs = self.options.visible_refs.get_or_insert_with(Vec::new);
+        let refs = self
+            .options
+            .visible_refs
+            .get_or_insert_with(|| vec!["HEAD".into()]);
         for reference in references {
             if enable {
                 if !refs.iter().any(|name| {
@@ -2009,7 +2018,11 @@ impl App {
                         self.append_output(&String::from_utf8_lossy(&chunk));
                     }
                     self.flush_output();
-                    self.busy = None;
+                    let command_label = self
+                        .busy
+                        .take()
+                        .map(|(_, _, label)| label)
+                        .unwrap_or_default();
                     match result {
                         Ok(_) => {
                             self.notice = "Command completed".into();
@@ -2018,6 +2031,13 @@ impl App {
                         Err(error) => {
                             self.notice = error.clone();
                             self.append_output(&format!("\n✗ {error}\n"));
+                            if error != "Cancelled" {
+                                let message = format!("Command failed: {command_label}\n\n{error}");
+                                self.last_command_error = Some(message.clone());
+                                if self.modal.is_none() {
+                                    self.error(message);
+                                }
+                            }
                         }
                     }
                     self.loading = false;
@@ -2101,6 +2121,9 @@ impl App {
         true
     }
     pub fn error(&mut self, message: String) {
+        let (message, selection) = crate::recovery::MessageSelection::prepare(strip_ansi(&message));
+        self.message_selection = selection;
+        self.recovery_message = None;
         self.notice = message.clone();
         self.message_scroll = 0;
         self.message_max_scroll = 0;
@@ -2413,9 +2436,12 @@ impl App {
         });
     }
     fn confirm(&mut self, operation: Operation) {
+        self.recovery_message = None;
         if self.warn_if_busy(&operation.label) {
             return;
         }
+        self.message_scroll = 0;
+        self.message_max_scroll = 0;
         self.modal = Some(Modal::Confirm {
             title: operation.label.clone(),
             operation,
@@ -2799,9 +2825,45 @@ impl App {
                 });
             }
             Modal::Confirm { title, operation } => match key.code {
-                KeyCode::Char('y') | KeyCode::Enter => self.run_operation(operation),
-                KeyCode::Esc | KeyCode::Char('n') => {}
-                _ => self.modal = Some(Modal::Confirm { title, operation }),
+                KeyCode::Char('y') | KeyCode::Enter => {
+                    self.recovery_message = None;
+                    self.run_operation(operation);
+                }
+                KeyCode::Esc | KeyCode::Char('n') => {
+                    if let Some(message) = self.recovery_message.take() {
+                        self.message_scroll = 0;
+                        self.message_selection.follow_cursor = true;
+                        self.modal = Some(Modal::Message(message));
+                    }
+                }
+                _ => {
+                    match key.code {
+                        KeyCode::Down | KeyCode::Char('j') => {
+                            self.message_scroll = self
+                                .message_scroll
+                                .saturating_add(1)
+                                .min(self.message_max_scroll)
+                        }
+                        KeyCode::Up | KeyCode::Char('k') => {
+                            self.message_scroll = self.message_scroll.saturating_sub(1)
+                        }
+                        KeyCode::PageDown => {
+                            self.message_scroll = self
+                                .message_scroll
+                                .saturating_add(self.message_page_size.max(1))
+                                .min(self.message_max_scroll)
+                        }
+                        KeyCode::PageUp => {
+                            self.message_scroll = self
+                                .message_scroll
+                                .saturating_sub(self.message_page_size.max(1))
+                        }
+                        KeyCode::Home => self.message_scroll = 0,
+                        KeyCode::End => self.message_scroll = self.message_max_scroll,
+                        _ => {}
+                    }
+                    self.modal = Some(Modal::Confirm { title, operation });
+                }
             },
             Modal::Menu {
                 title,
@@ -2883,30 +2945,71 @@ impl App {
                 });
             }
             Modal::Message(message) => {
+                let last = message.split('\n').count().saturating_sub(1);
+                let page = self.message_page_size.saturating_sub(1).max(1);
+                self.message_selection.follow_cursor = true;
                 match key.code {
-                    KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
+                    KeyCode::Esc | KeyCode::Char('q') => {
                         self.message_scroll = 0;
                         return Ok(());
                     }
+                    KeyCode::Enter => {
+                        if let Some(operation) = self.message_selection.operation() {
+                            self.confirm(operation);
+                            if matches!(self.modal, Some(Modal::Confirm { .. })) {
+                                self.recovery_message = Some(message);
+                            }
+                        } else if self.message_selection.marked.is_empty() {
+                            self.message_scroll = 0;
+                        } else {
+                            self.notice =
+                                "No executable command selected; y copies the selected text".into();
+                            self.modal = Some(Modal::Message(message));
+                        }
+                        return Ok(());
+                    }
+                    KeyCode::Char('v') => self.message_selection.toggle(),
+                    KeyCode::Char('y') => {
+                        let text = self.message_selection.copy_text(&message);
+                        self.copy(text);
+                        // Keep the selection visible unless the busy warning replaced it.
+                        if self.modal.is_none() {
+                            self.modal = Some(Modal::Message(message));
+                        }
+                        return Ok(());
+                    }
                     KeyCode::Down | KeyCode::Char('j') => {
-                        self.message_scroll = (self.message_scroll + 1).min(self.message_max_scroll)
+                        self.message_selection.cursor =
+                            (self.message_selection.cursor + 1).min(last);
                     }
                     KeyCode::Up | KeyCode::Char('k') => {
-                        self.message_scroll = self.message_scroll.saturating_sub(1)
+                        self.message_selection.cursor =
+                            self.message_selection.cursor.saturating_sub(1);
                     }
-                    KeyCode::PageDown => {
-                        self.message_scroll = self
-                            .message_scroll
-                            .saturating_add(self.message_page_size.saturating_sub(1).max(1))
-                            .min(self.message_max_scroll)
+                    KeyCode::PageDown | KeyCode::PageUp => {
+                        self.message_scroll = if key.code == KeyCode::PageDown {
+                            self.message_scroll
+                                .saturating_add(page)
+                                .min(self.message_max_scroll)
+                        } else {
+                            self.message_scroll.saturating_sub(page)
+                        };
+                        self.message_selection.cursor = self
+                            .message_selection
+                            .row_starts
+                            .partition_point(|row| *row <= self.message_scroll)
+                            .saturating_sub(1)
+                            .min(last);
+                        self.message_selection.follow_cursor = false;
                     }
-                    KeyCode::PageUp => {
-                        self.message_scroll = self
-                            .message_scroll
-                            .saturating_sub(self.message_page_size.saturating_sub(1).max(1))
+                    KeyCode::Home => {
+                        self.message_selection.cursor = 0;
+                        self.message_scroll = 0;
                     }
-                    KeyCode::Home => self.message_scroll = 0,
-                    KeyCode::End => self.message_scroll = self.message_max_scroll,
+                    KeyCode::End => {
+                        self.message_selection.cursor = last;
+                        self.message_scroll = self.message_max_scroll;
+                    }
                     _ => {}
                 }
                 self.modal = Some(Modal::Message(message));
@@ -2963,9 +3066,7 @@ impl App {
             if self.busy.is_some() {
                 self.notice = "Ctrl+c cancels the active command before quitting.".into();
             } else if self.config.confirm_on_quit {
-                self.modal = Some(Modal::Message(
-                    "Press Ctrl+c to quit, or Esc to continue.".into(),
-                ));
+                self.error("Press Ctrl+c to quit, or Esc to continue.".into());
             } else {
                 self.quit = true;
             }
@@ -3379,6 +3480,16 @@ impl App {
             return Ok(());
         }
         match self.focus {
+            Panel::Output if key_matches("<enter>", key) || key_matches("v", key) => {
+                let message = self
+                    .last_command_error
+                    .clone()
+                    .unwrap_or_else(|| self.output.iter().cloned().collect::<Vec<_>>().join("\n"));
+                self.error(message);
+                if key_matches("v", key) {
+                    self.message_selection.toggle();
+                }
+            }
             Panel::Files => self.files_key(key)?,
             Panel::CommitFiles => self.commit_files_key(key)?,
             Panel::HeadFiles => self.head_files_key(key)?,
@@ -3825,7 +3936,7 @@ impl App {
                 self.rebuild_branch_rows();
                 return Ok(());
             }
-            if key_matches("<space>", key) {
+            if key_matches("v", key) || key_matches("V", key) || key_matches("<space>", key) {
                 let references: Vec<_> = row
                     .descendants
                     .iter()
@@ -3852,7 +3963,7 @@ impl App {
         } else if self.is("branches", "checkoutPreviousBranch", &["-"], key) {
             self.run_operation(Operation::git(["switch", "-"]));
         } else if let Some(reference) = reference {
-            if key_matches("<space>", key) {
+            if key_matches("v", key) || key_matches("V", key) || key_matches("<space>", key) {
                 self.toggle_branch_visibility(std::slice::from_ref(&reference));
             } else if key_matches("<enter>", key) {
                 let operation = match reference.kind {
@@ -3924,8 +4035,14 @@ impl App {
             self.reset_menu(&commit.oid);
         } else if self.is("commits", "revertCommit", &["t"], key) {
             self.confirm(Operation::git(["revert", "--no-edit", &commit.oid]));
-        } else if self.is("commits", "cherryPickCopy", &["C"], key) {
-            if !self.copied_commits.contains(&commit.oid) {
+        } else if key_matches("v", key) || self.is("commits", "cherryPickCopy", &["C"], key) {
+            if let Some(index) = self
+                .copied_commits
+                .iter()
+                .position(|oid| oid == &commit.oid)
+            {
+                self.copied_commits.remove(index);
+            } else {
                 self.copied_commits.push(commit.oid);
             }
             self.copied_commits.sort_by_key(|oid| {
@@ -3937,11 +4054,11 @@ impl App {
                         .unwrap_or(0),
                 )
             });
-            self.notice = "Commit copied; V cherry-picks copied commits".into();
+            self.notice = "v selects / deselects commits; V cherry-picks selected commits".into();
         } else if self.is("commits", "pasteCommits", &["V"], key) {
             let commits = self.copied_commits.clone();
             if commits.is_empty() {
-                bail!("Copy commits with C first");
+                bail!("Select commits with v first");
             }
             let mut args: Vec<OsString> = vec!["cherry-pick".into()];
             args.extend(commits.into_iter().map(Into::into));

@@ -217,6 +217,10 @@ type Spec = (
 );
 #[rustfmt::skip]
 const COMMANDS: &[Spec] = &[
+    ("Messages", "", "", "v", "Select / deselect message line", "Toggle the hovered line. Arrows move; PgUp/PgDn scroll long text."),
+    ("Messages", "", "", "y", "Copy message selection", "Copy selected lines, or the whole message when nothing is marked."),
+    ("Messages", "", "", "Enter", "Review selected commands", "Review marked command lines and confirm before execution. Commands run in the current repository and are logged; shell expressions remain copy-only."),
+    ("Output", "", "", "Enter", "Inspect command message", "Reopen the last failure or inspect output to select text and suggested commands."),
     ("Navigation", "", "", "1", "Repositories", "Focus pane 1. Enter opens the selected recent repository; r opens repository operations."),
     ("Navigation", "", "", "2", "Local branches", "Focus local branches, tags and worktrees in pane 2."),
     ("Navigation", "", "", "3", "Remote branches", "Focus remote branches in pane 3."),
@@ -300,7 +304,7 @@ const COMMANDS: &[Spec] = &[
     ("Commit graph", "commits", "checkoutCommit", "<space>", "Checkout commit…", "Confirm switching to the selected commit with a detached HEAD."),
     ("Commit graph", "commits", "viewResetOptions", "g", "Reset options…", "Choose soft, mixed or hard reset of the current branch to the selected commit."),
     ("Commit graph", "commits", "revertCommit", "t", "Revert commit…", "Create a new commit that reverses the selected commit's changes."),
-    ("Commit graph", "commits", "cherryPickCopy", "C", "Copy commit", "Add the selected commit to the cherry-pick selection; copy multiple commits before switching branches."),
+    ("Commit graph", "", "", "v", "Select / deselect commit", "Toggle the hovered commit in the cherry-pick selection. C also toggles; V applies the selected commits."),
     ("Commit graph", "commits", "pasteCommits", "V", "Cherry-pick copied commits…", "Apply copied commits in their original source order on the current branch."),
     ("Commit graph", "commits", "createFixupCommit", "F", "Create fixup commit", "Commit staged changes as a fixup for the selected commit."),
     ("Commit graph", "commits", "createTag", "T", "Create tag…", "Create a named tag pointing to the selected commit."),
@@ -310,7 +314,7 @@ const COMMANDS: &[Spec] = &[
     ("Commit graph", "commits", "copyCommitAttributeToClipboard", "y", "Copy hash", "Copy the full selected commit ID to the clipboard."),
     ("Commit graph", "commits", "viewBisectOptions", "b", "Bisect options…", "Start a bisect, mark good/bad, skip a commit, or reset bisect."),
     ("Commit graph", "universal", "nextTab", "]", "Commits / reflog", "Toggle the graph between commit history and the reflog."),
-    ("Branches", "", "", "<space>", "Toggle branch in graph", "Enable or hide a local or remote branch without checking it out. A group toggles all descendant branches; visibility is saved per repository."),
+    ("Branches", "", "", "v / V", "Toggle branch in graph", "Select or deselect a local or remote branch for the graph. A group toggles all descendants; Space is also supported. Visibility is saved per repository."),
     ("Branches", "", "", "Enter", "Checkout reference / toggle group", "Switch to the selected local branch, track a remote branch, or detach at a tag. On a group, expand or collapse it."),
     ("Branches", "universal", "new", "n", "Create branch…", "Create a branch from the selected reference or from HEAD when a group is selected."),
     ("Branches", "branches", "checkoutBranchByName", "c", "Checkout by name…", "Enter the name of the branch to check out."),

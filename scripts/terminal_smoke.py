@@ -161,7 +161,7 @@ def main():
             session.until("Confirm")
             session.send("\x1b")
             session.read(0.1)
-            session.send("2/feature\r ")
+            session.send("2/feature\rv")
             state_file = config / "rust-state.json"
             eventually(lambda: state_file.exists() and all(reference in json.loads(state_file.read_text())["visibleBranches"].get(str(root.resolve()), []) for reference in ["refs/heads/feature/user/login", "refs/heads/feature/user/profile"]), pump=session.read)
             assert git(root, "rev-parse", "HEAD") == original_head, "Graph toggle checked out a branch"
@@ -239,9 +239,23 @@ def main():
             session.until("Cancelled")
             session.read(0.15)
             assert not (root / "blocked-command-ran").exists(), "Blocked command was queued"
+            session.data = b""
+            session.send(":printf 'fatal: smoke failure\\nhint: git config --local recovery.smoke fixed\\n' >&2; exit 1\r")
+            session.until("v select/deselect")
+            session.send("\x1b[Fv")
+            session.read(0.1)
+            session.send("v")
+            session.read(0.1)
+            session.send("v\r")
+            session.until("Confirm")
+            session.send("\x1b")
+            session.read(0.1)
+            session.send("\r\r")
+            eventually(lambda: subprocess.run(["git", "config", "--local", "--get", "recovery.smoke"], cwd=root, capture_output=True).stdout.strip() == b"fixed", pump=session.read)
+            session.read(0.15)
             session.finish()
             finished = True
-            print(json.dumps({"terminal_smoke": "passed", "ready_ms": ready_ms, "verified": ["pull options", "force-push confirmation cancellation", "nested branch group graph toggle without checkout", "persisted branch visibility", "automatic full commit inspection", "modified arrow navigation", "executable context menu", "persisted commit page size from actions", "working-tree navigation", "ahead/behind header", "HEAD tree tab and committed contents", "live fuzzy file search", "independent file-tab filters", "full-screen large hunk keyboard scrolling", "staging", "commit", "revision comparison menu and read-only file diffs", "persisted preview toggle", "live output", "busy-command popup without queueing", "process cancellation from popup", "clean terminal restoration"]}))
+            print(json.dumps({"terminal_smoke": "passed", "ready_ms": ready_ms, "verified": ["pull options", "force-push confirmation cancellation", "nested branch group graph toggle without checkout", "persisted branch visibility", "automatic full commit inspection", "modified arrow navigation", "executable context menu", "persisted commit page size from actions", "working-tree navigation", "ahead/behind header", "HEAD tree tab and committed contents", "live fuzzy file search", "independent file-tab filters", "full-screen large hunk keyboard scrolling", "staging", "commit", "revision comparison menu and read-only file diffs", "persisted preview toggle", "live output", "busy-command popup without queueing", "process cancellation from popup", "error popup and command detection", "v selection and deselection", "command review cancellation preserves selection", "confirmed fix execution", "clean terminal restoration"]}))
         except Exception:
             session.read(0.1)
             import re

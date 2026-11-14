@@ -170,11 +170,11 @@ fn long_message_scrolls_at_small_terminal_size_and_keeps_controls_visible() {
     app.error(message);
     let initial = screen(&mut app);
     assert!(initial.contains("Message row 000"));
-    assert!(initial.contains("Enter / Esc close"), "{initial}");
+    assert!(initial.contains("v select/deselect"), "{initial}");
     assert!(!initial.contains("FINAL_MESSAGE_LINE"));
     assert!(app.message_max_scroll > app.message_page_size);
     key(&mut app, KeyCode::Down);
-    assert_eq!(app.message_scroll, 1);
+    assert_eq!(app.message_selection.cursor, 1);
     key(&mut app, KeyCode::Up);
     assert_eq!(app.message_scroll, 0);
     key(&mut app, KeyCode::PageDown);
@@ -186,7 +186,7 @@ fn long_message_scrolls_at_small_terminal_size_and_keeps_controls_visible() {
     assert_eq!(app.message_scroll, app.message_max_scroll);
     let final_page = screen(&mut app);
     assert!(final_page.contains("FINAL_MESSAGE_LINE"), "{final_page}");
-    assert!(final_page.contains("Enter / Esc close"), "{final_page}");
+    assert!(final_page.contains("v select/deselect"), "{final_page}");
     key(&mut app, KeyCode::Home);
     assert_eq!(app.message_scroll, 0);
     key(&mut app, KeyCode::Esc);

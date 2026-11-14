@@ -436,12 +436,10 @@ fn collect_actions(app: &App, limit: usize) -> Vec<Action> {
                     "Inspect changed files",
                     "Focus the files changed by the selected commit.",
                 );
-                catalog.add(
-                    "commits",
-                    "cherryPickCopy",
-                    "C",
-                    "Copy commit",
-                    "Add this commit to the cherry-pick selection.",
+                catalog.key(
+                    "v",
+                    "Select / deselect commit",
+                    "Toggle this commit in the cherry-pick selection. C is also supported.",
                 );
                 catalog.add(
                     "commits",
@@ -559,14 +557,14 @@ fn collect_actions(app: &App, limit: usize) -> Vec<Action> {
                         "Toggle this branch group and its nested groups.",
                     );
                     catalog.key(
-                        "<space>",
+                        "v",
                         "Toggle group in graph",
                         "Enable all branches in this group, or disable them when all are enabled.",
                     );
                 }
                 if let Some(reference) = app.selected_ref() {
                     catalog.key(
-                        "<space>",
+                        "v",
                         "Toggle branch in graph",
                         "Show or hide this branch without checking it out.",
                     );
@@ -928,6 +926,12 @@ fn collect_actions(app: &App, limit: usize) -> Vec<Action> {
             );
         }
         Panel::Output => {
+            catalog.key("<enter>", "Inspect command message", "Open the last failure or command output; v marks lines, y copies, and Enter reviews selected commands.");
+            catalog.key(
+                "v",
+                "Select message text",
+                "Open command output and toggle its first line in the text selection.",
+            );
             catalog.key(
                 "<end>",
                 "Follow output",

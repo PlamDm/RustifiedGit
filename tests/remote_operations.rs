@@ -166,6 +166,8 @@ fn lease_rejects_unseen_remote_commit_and_explicit_force_can_replace_it() {
         "{:?}",
         app.output
     );
+    assert!(matches!(app.modal, Some(Modal::Message(_))));
+    key(&mut app, KeyCode::Esc);
     choose(&mut app, 'P', "Force push (", true);
     assert_eq!(git(&remote, &["rev-parse", "main"]), original);
     assert!(

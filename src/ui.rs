@@ -848,7 +848,7 @@ fn draw_graph(frame: &mut Frame, area: Rect, app: &mut App) {
             if app.copied_commits.contains(&commit.oid) {
                 let budget = left_width.saturating_sub(spans.iter().map(Span::width).sum());
                 spans.push(Span::styled(
-                    elide("C ", budget.min(2)),
+                    elide("[x]", budget.min(3)),
                     Style::default().fg(Color::Magenta),
                 ));
             }
@@ -1335,6 +1335,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             Paragraph::new("Enlarge the terminal to at least 80 × 22.\nPress q to quit."),
             area,
         );
+        draw_modal(frame, app);
         return;
     }
     let areas = areas(area, app);
@@ -1757,9 +1758,15 @@ fn draw_modal(frame: &mut Frame, app: &mut App) {
             frame.render_widget(block("Confirm", true), rect);
             let parts = Layout::vertical([Constraint::Min(1), Constraint::Length(2)])
                 .split(rect.inner(ratatui::layout::Margin::new(1, 1)));
-            frame.render_widget(body, parts[0]);
+            app.message_page_size = parts[0].height as usize;
+            app.message_max_scroll = body
+                .line_count(parts[0].width)
+                .saturating_sub(app.message_page_size)
+                .min(u16::MAX as usize);
+            app.message_scroll = app.message_scroll.min(app.message_max_scroll);
+            frame.render_widget(body.scroll((app.message_scroll as u16, 0)), parts[0]);
             frame.render_widget(
-                Paragraph::new("y / Enter confirm · n / Esc cancel")
+                Paragraph::new("y / Enter confirm · n / Esc cancel · ↑/↓ scroll")
                     .style(Style::default().fg(Color::Yellow))
                     .wrap(Wrap { trim: false }),
                 parts[1],
@@ -1852,38 +1859,82 @@ fn draw_modal(frame: &mut Frame, app: &mut App) {
             );
         }
         Modal::Message(message) => {
-            let paragraph = Paragraph::new(message.as_str()).wrap(Wrap { trim: false });
             let width = area.width.saturating_sub(2).min(96);
-            let lines = paragraph.line_count(width.saturating_sub(2));
-            let rect = centered(area, 96, lines.saturating_add(4).clamp(7, 24) as u16);
+            let content_width = width.saturating_sub(2).max(1);
+            let selection = &mut app.message_selection;
+            selection.row_starts.clear();
+            let mut lines = 0;
+            let content: Vec<_> = message
+                .split('\n')
+                .enumerate()
+                .map(|(index, text)| {
+                    selection.row_starts.push(lines);
+                    let marked = selection.marked.contains(&index);
+                    let executable = selection.commands.contains_key(&index);
+                    let line = Line::styled(
+                        format!(
+                            "{}{} {text}",
+                            if marked { "[x]" } else { "[ ]" },
+                            if executable { " >" } else { "  " }
+                        ),
+                        Style::default()
+                            .fg(if executable { Color::Cyan } else { Color::Gray })
+                            .bg(if index == selection.cursor {
+                                SELECTED
+                            } else {
+                                Color::Reset
+                            }),
+                    );
+                    lines += Paragraph::new(line.clone())
+                        .wrap(Wrap { trim: false })
+                        .line_count(content_width)
+                        .max(1);
+                    line
+                })
+                .collect();
+            let rect = centered(area, 96, lines.saturating_add(5).clamp(8, 26) as u16);
             frame.render_widget(Clear, rect);
-            let regions = Layout::vertical([Constraint::Min(1), Constraint::Length(2)])
+            let regions = Layout::vertical([Constraint::Min(1), Constraint::Length(3)])
                 .split(rect.inner(ratatui::layout::Margin::new(1, 1)));
             app.message_page_size = regions[0].height as usize;
             app.message_max_scroll = lines
                 .saturating_sub(app.message_page_size)
                 .min(u16::MAX as usize);
+            let cursor_start = selection
+                .row_starts
+                .get(selection.cursor)
+                .copied()
+                .unwrap_or(0);
+            let cursor_end = selection
+                .row_starts
+                .get(selection.cursor + 1)
+                .copied()
+                .unwrap_or(lines);
+            if selection.follow_cursor && cursor_start < app.message_scroll {
+                app.message_scroll = cursor_start;
+            } else if selection.follow_cursor
+                && cursor_start >= app.message_scroll + app.message_page_size
+            {
+                app.message_scroll = cursor_end.saturating_sub(app.message_page_size);
+            }
             app.message_scroll = app.message_scroll.min(app.message_max_scroll);
-            let title = if app.message_max_scroll > 0 {
-                format!(
-                    "Message · lines {}–{} of {lines}",
-                    app.message_scroll + 1,
-                    (app.message_scroll + app.message_page_size).min(lines)
-                )
-            } else {
-                "Message".into()
-            };
-            frame.render_widget(block(title, true), rect);
-            frame.render_widget(paragraph.scroll((app.message_scroll as u16, 0)), regions[0]);
+            selection.follow_cursor = false;
             frame.render_widget(
-                Paragraph::new(if app.message_max_scroll > 0 {
-                    "↑/↓ or PgUp/PgDn scroll · Enter / Esc close"
-                } else {
-                    "Enter / Esc close"
-                })
-                .style(Style::default().fg(Color::Yellow))
-                .wrap(Wrap { trim: false }),
-                regions[1],
+                block(
+                    format!("Message · {} selected", selection.marked.len()),
+                    true,
+                ),
+                rect,
+            );
+            frame.render_widget(
+                Paragraph::new(content)
+                    .wrap(Wrap { trim: false })
+                    .scroll((app.message_scroll as u16, 0)),
+                regions[0],
+            );
+            frame.render_widget(
+                Paragraph::new("↑/↓ choose · v select/deselect · y copy\nEnter reviews selected commands; otherwise closes\nEsc close · PgUp/PgDn scroll")
+                    .style(Style::default().fg(Color::Yellow)).wrap(Wrap { trim: false }), regions[1],
             );
         }
     }

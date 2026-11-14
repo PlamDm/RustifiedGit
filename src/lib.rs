@@ -9,6 +9,7 @@ pub mod history;
 pub mod model;
 pub mod patch;
 pub mod process;
+pub mod recovery;
 pub mod tree;
 pub mod ui;
 pub mod worker;

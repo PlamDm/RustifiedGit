@@ -36,6 +36,20 @@ Omit `-p` to open the current directory.
 - Press `7` to focus the changed files. Select a file and press `Enter` to inspect it.
 - Press `?` and start typing to search shortcuts, or press `O` for actions in the current pane.
 
+Use `v` to select or deselect files, folders, commits, and branches. In branch
+panes this controls which branches appear in the graph; it does not check them out.
+
+When a command fails, its message opens automatically. Use arrows to choose a
+line, `v` to select/deselect it, and `y` to copy selected lines (or the entire
+message if nothing is selected). Recognized command lines have a `>` marker.
+Mark a command with `v`, then press `Enter` to review and confirm execution.
+Commands run in the current repository and their output appears in pane 6.
+`Esc` cancels; cancelling confirmation preserves your message selection.
+Press `Enter` in the Output tab to reopen the last failure. Common Git errors
+include suggested next steps; those suggestions never run automatically.
+Shell expressions and commands containing placeholders remain copyable text.
+Use PgUp/PgDn to read long messages and command confirmations.
+
 Release notes and SHA-256 checksums are on [GitHub Releases](https://github.com/PlamDm/RustifiedGit/releases/latest).
 
 ## Numbered panes
@@ -68,7 +82,7 @@ Use `i` to initialize/update the selected submodule recursively, or `a` for all
 submodules. Command progress appears in pane 6. Inside a submodule, the same tab
 lists its nested submodules and a **Parent repository** row to return to the parent.
 
-In local or remote branches, **Space toggles graph visibility**; **Enter checks
+In local or remote branches, **v toggles graph visibility** (`V` and Space also work); **Enter checks
 out** the branch. The graph combines enabled refs and their shared ancestors
 without duplicate commits, preserving Git's merge connections. Visibility is
 saved per repository. Initially the graph shows the current branch.
@@ -83,7 +97,7 @@ author when changes are cherry-picked.
 Local and remote branches form nested groups separated by `/`: a branch named
 `feature/user/login` appears under `feature/` → `user/` → `login`. Remotes add a
 top-level group such as `origin/`. `Enter` expands/collapses a group;
-Left/Right navigates its hierarchy. Space enables all branches in a group, or
+Left/Right navigates its hierarchy. `v` enables all branches in a group, or
 disables them when all are enabled. On a branch leaf, Enter still checks out
 that branch. Searching reveals matching branches inside collapsed groups.
 Set `gui.branchGroupDelimiter` to another separator, or an empty string for a flat list.
